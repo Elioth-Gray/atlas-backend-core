@@ -16,10 +16,16 @@ import (
 
 // Deps holds everything the router needs. It is built once at startup in cmd/api.
 type Deps struct {
-	Config      *config.Config
-	Logger      *slog.Logger
-	DB          handler.Pinger
-	UserService handler.UserService
+	Config              *config.Config
+	Logger              *slog.Logger
+	DB                  handler.Pinger
+	Tokens              middleware.AccessTokenParser
+	AuthService         handler.AuthService
+	ShopService         handler.ShopService
+	FeedbackService     handler.FeedbackService
+	InsightService      handler.InsightService
+	ConsultationService handler.ConsultationService
+	MemoryService       handler.MemoryService
 }
 
 // SetMode selects gin's mode for the given APP_ENV. Debug mode prints route information,
@@ -68,16 +74,49 @@ func InitRouter(deps Deps) (*gin.Engine, error) {
 	r.GET("/readyz", health.Ready)
 
 	v1 := r.Group("/api/v1")
-	registerUserRoutes(v1, handler.NewUserHandler(deps.UserService))
+	shops := handler.NewShopHandler(deps.ShopService, deps.FeedbackService)
+	registerPublicRoutes(v1.Group("/public"), shops)
+	registerAuthRoutes(v1.Group("/auth"), handler.NewAuthHandler(deps.AuthService))
+	registerOwnerRoutes(
+		v1.Group("/owner", middleware.RequireAuth(deps.Tokens)),
+		shops,
+		handler.NewInsightHandler(deps.InsightService),
+		handler.NewConsultationHandler(deps.ConsultationService, deps.MemoryService),
+	)
 
 	return r, nil
 }
 
-func registerUserRoutes(v1 *gin.RouterGroup, h *handler.UserHandler) {
-	users := v1.Group("/users")
-	users.POST("", h.Create)
-	users.GET("", h.List)
-	users.GET("/:id", h.Get)
-	users.PATCH("/:id", h.Update)
-	users.DELETE("/:id", h.Delete)
+// registerPublicRoutes mounts the unauthenticated customer endpoints (QR page).
+func registerPublicRoutes(g *gin.RouterGroup, shops *handler.ShopHandler) {
+	g.GET("/shop-categories", shops.Categories)
+	g.GET("/shop-scales", shops.Scales)
+	g.GET("/shops/:shopId", shops.GetPublic)
+	g.POST("/shops/:shopId/feedbacks", shops.SubmitFeedback)
+}
+
+func registerAuthRoutes(g *gin.RouterGroup, h *handler.AuthHandler) {
+	g.POST("/register", h.Register)
+	g.POST("/login", h.Login)
+	g.POST("/refresh", h.Refresh)
+}
+
+// registerOwnerRoutes mounts the endpoints for shop members. Every handler checks that the
+// authenticated user belongs to the shop that owns the requested resource.
+func registerOwnerRoutes(g *gin.RouterGroup, shops *handler.ShopHandler, insights *handler.InsightHandler, consult *handler.ConsultationHandler) {
+	g.GET("/shops", shops.ListMine)
+	g.GET("/shops/:shopId", shops.GetMine)
+	g.PUT("/shops/:shopId", shops.UpdateMine)
+	g.GET("/shops/:shopId/dashboard", insights.Dashboard)
+	g.GET("/shops/:shopId/issues", insights.ListIssues)
+	g.GET("/shops/:shopId/memories", consult.ListMemories)
+
+	g.GET("/issues/:issueId", insights.GetIssue)
+	g.POST("/issues/:issueId/consultations", consult.Start)
+
+	g.GET("/consultations/:sessionId", consult.Get)
+	g.POST("/consultations/:sessionId/turns", consult.Turn)
+	g.POST("/consultations/:sessionId/save", consult.Save)
+
+	g.PATCH("/memories/:memoryId", consult.UpdateMemory)
 }

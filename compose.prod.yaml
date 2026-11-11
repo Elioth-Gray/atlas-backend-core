@@ -1,7 +1,9 @@
 # Production: docker compose -f compose.prod.yaml up -d   -> REST http://localhost:8000, gRPC localhost:9000
 # Stop:       docker compose -f compose.prod.yaml down
-# Reads .env (copy .env.example first and set real secrets: POSTGRES_PASSWORD, GRPC_AUTH_TOKEN)
+# Reads .env (copy .env.example first and set real secrets: POSTGRES_PASSWORD, GRPC_AUTH_TOKEN,
+# JWT_SECRET) and AI_GRPC_ADDR (the Python AI service)
 # Using a managed PostgreSQL? Delete the "db" service and "depends_on", and set DATABASE_URL below to it.
+# It must offer the pgvector extension ("vector").
 name: atlas-backend-prod
 
 services:
@@ -25,6 +27,7 @@ services:
       GRPC_HOST: ''
       GRPC_PORT: '9090'
       GRPC_AUTH_TOKEN: ${GRPC_AUTH_TOKEN:?set GRPC_AUTH_TOKEN (at least 32 characters) in .env}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (at least 32 random characters) in .env}
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
       # Pending migrations are applied on startup; a PostgreSQL advisory lock keeps concurrent starts safe
       DB_AUTO_MIGRATE: 'true'
@@ -34,7 +37,8 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres:17-alpine
+    # PostgreSQL 17 with the pgvector extension (opinion embeddings)
+    image: pgvector/pgvector:0.8.0-pg17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}

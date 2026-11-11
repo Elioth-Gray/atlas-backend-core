@@ -10,7 +10,9 @@ Coding and architecture rules are in [docs/GUIDELINES.MD](docs/GUIDELINES.MD). R
 | Language | Go 1.26 (`go.mod` downloads the toolchain automatically if your local Go is older) |
 | HTTP (frontend) | Gin with custom middleware (request ID, access log, recovery, security headers, CORS, body limit) |
 | gRPC (between backends) | grpc-go + buf, interceptors (request ID, recovery, logging, auth token), health check |
-| Database | PostgreSQL 17 + GORM (pgx driver) |
+| Database | PostgreSQL 17 + pgvector + GORM (pgx driver) |
+| Auth | JWT (HS256): short-lived access token + rotating refresh token, bcrypt passwords |
+| AI | Python AI service over gRPC ([proto/atlas/ai/v1/ai.proto](proto/atlas/ai/v1/ai.proto)), `cmd/fakeai` stub for local work |
 | Migrations | golang-migrate, SQL files in `migrations/` embedded into the binaries |
 | Logging | `log/slog` (text in dev, JSON in prod), `request_id` attached to every log line |
 | Containers | Multi-stage Dockerfile (`deps`, `dev`, `build`, `prod`), same pattern as the frontend Docker guide |
@@ -38,12 +40,14 @@ Copy `.env.example` to `.env` first (`cp .env.example .env`); both modes read it
 Host ports are chosen so they do not clash with the frontend (dev `5173`, prod `8080`). REST in dev uses `3333` to match the default `VITE_BACKEND_URL` in the frontend template.
 
 **Development**
+- The stack includes `fakeai`, a deterministic stand-in for the Python AI service, so feedback processing and consultations work out of the box. Set `DOCKER_AI_GRPC_ADDR` in `.env` (e.g. `host.docker.internal:50051`) to use the real service instead, and `FAKEAI_DELAY=3s` to simulate slow AI turns.
+- The database image is `pgvector/pgvector` (PostgreSQL 17 + pgvector). If you ran the stack before this change, start once with a fresh volume: `docker compose -f compose.dev.yaml down -v`.
 - Only the source folders (`cmd/`, `internal/`, `migrations/`, `gen/`) are mounted. Changes there rebuild the API immediately.
 - Changes outside those folders (`go.mod`, `.air.toml`, `Dockerfile`, `.env`) need `down` and then `up` again; the rebuild happens automatically.
 - The dev PostgreSQL is reachable from the host at `localhost:5433` (default `atlas`/`atlas`/`atlas`), and migrations run automatically on startup.
 
 **Production**
-- `POSTGRES_PASSWORD` and `GRPC_AUTH_TOKEN` (at least 32 characters, e.g. `openssl rand -hex 32`) must be set in `.env`. Compose refuses to start without them.
+- `POSTGRES_PASSWORD`, `GRPC_AUTH_TOKEN`, and `JWT_SECRET` (the last two at least 32 characters, e.g. `openssl rand -hex 32`) must be set in `.env`. Compose refuses to start without them. Set `AI_GRPC_ADDR` (and `AI_GRPC_TOKEN`) to the Python AI service.
 - Migrations run automatically when the API starts, and the database port is not published to the host.
 - Using a managed PostgreSQL? See the comments in [compose.prod.yaml](compose.prod.yaml).
 
@@ -78,6 +82,7 @@ The `Makefile` offers the same shortcuts (`make dev`, `make prod-up`, `make help
 cp .env.example .env
 docker compose -f compose.dev.yaml up -d db   # PostgreSQL only, port 5433
 go run ./cmd/migrate up
+go run ./cmd/fakeai                           # optional AI stub on :50051 (set AI_GRPC_ADDR=localhost:50051)
 go run ./cmd/api                              # REST :3333, gRPC :9090
 ```
 
@@ -85,10 +90,38 @@ Want to use a locally installed PostgreSQL (port 5432)? Change `DATABASE_URL` in
 
 ## REST (frontend)
 
+All routes live under `/api/v1`. `/owner/*` routes need `Authorization: Bearer <access_token>` and only ever return data of shops the user belongs to (`shops_users`); resources of other shops answer `404`.
+
+| Area | Method & path | Notes |
+| --- | --- | --- |
+| Public | `GET /public/shops/:shopId` | Shop profile for the customer QR page |
+| | `POST /public/shops/:shopId/feedbacks` | `{name?, rating 1.0-5.0, feedback, image?}` → `201 {feedback_id}`; the AI runs in the background |
+| | `GET /public/shop-categories`, `GET /public/shop-scales` | Master data for the registration form |
+| Auth | `POST /auth/register` | Owner account **and** their shop: `{name, email, password, phone_number?, shop: {name, category_id, scale_id, description?, website?, image?}}` |
+| | `POST /auth/login` | `{email, password}` → access + refresh token |
+| | `POST /auth/refresh` | `{refresh_token}` → new pair; refresh tokens are single use |
+| Shops | `GET /owner/shops`, `GET /owner/shops/:shopId` | My shops with my role |
+| | `PUT /owner/shops/:shopId` | Owner only: full shop profile + optional `owner: {name?, phone_number?}` |
+| Dashboard | `GET /owner/shops/:shopId/dashboard?from=YYYY-MM-DD&to=YYYY-MM-DD&tz=Asia/Jakarta` | KPIs, daily sentiment trend, weekly reviews, top 5 complaints, recent feedback (default: last 30 days) |
+| Issues | `GET /owner/shops/:shopId/issues` | Issues ("planets") with unique feedback vs. opinion counts, sentiment/severity, `planet_status` (`UNCONSULTED`, `CONSULTED`, `HAS_NEW_REVIEWS`) |
+| | `GET /owner/issues/:issueId` | Issue stats, 5 latest evidence opinions, consultation history |
+| Consultation | `POST /owner/issues/:issueId/consultations` | `{request_id}` → new session (`201`) with the SQL evidence snapshot and the first AI message |
+| | `GET /owner/consultations/:sessionId` | Session + messages in order |
+| | `POST /owner/consultations/:sessionId/turns` | `{request_id, state_version, event, content?}`; events `OWNER_REPLY`, `SKIP_QUESTION`, `GENERATE_NOW`, `CONTINUE_DISCUSSION` |
+| | `POST /owner/consultations/:sessionId/save` | `{final_solution_message_id, state_version?, confirmed_memories?: [{fact_text, source_owner_message_ids}]}` → `ARCHIVED`; never calls the AI |
+| Memories | `GET /owner/shops/:shopId/memories?is_active=true` | Business memories |
+| | `PATCH /owner/memories/:memoryId` | `{fact_text?, is_active?}` |
+
+Consultation rules the frontend relies on:
+- Generate a new `request_id` (UUID) per user action and reuse it when retrying. A repeated `request_id` returns the stored result (`"replayed": true`) without calling the AI again.
+- Send the session's current `state_version` with every turn. A stale version, a turn while another one is running (`"is_processing": true`), or an event the current status does not allow answers `409`: reload the session.
+- While `COLLECTING_CONTEXT`: `OWNER_REPLY` (with `content`), `SKIP_QUESTION`, `GENERATE_NOW`. While `SOLUTION_READY`: `CONTINUE_DISCUSSION` (with `content`), `GENERATE_NOW` (new revision), or save.
+- AI outages and AI answers that fail validation (unknown evidence IDs, missing solution parts) answer `503`; the session state is unchanged and the turn can be retried.
+
 ```bash
-curl -X POST localhost:3333/api/v1/users -H "Content-Type: application/json" \
-     -d '{"name":"Ada Lovelace","email":"ada@example.com"}'
-curl "localhost:3333/api/v1/users?page=1&page_size=20"
+curl -X POST localhost:3333/api/v1/auth/login -H "Content-Type: application/json" \
+     -d '{"email":"owner@example.com","password":"rahasia123"}'
+curl localhost:3333/api/v1/owner/shops -H "Authorization: Bearer <access_token>"
 ```
 
 Response format:
@@ -111,7 +144,8 @@ Every response carries an `X-Request-ID` header. Include it when reporting a bug
 
 The frontend only uses REST. gRPC is how other backends call ATLAS, and how ATLAS calls other backends.
 
-- **Contract**: [proto/atlas/user/v1/user.proto](proto/atlas/user/v1/user.proto). Share the `.proto` files with the other backend teams so they can generate their own clients.
+- **Contracts**: [proto/atlas/user/v1/user.proto](proto/atlas/user/v1/user.proto) (served by ATLAS) and [proto/atlas/ai/v1/ai.proto](proto/atlas/ai/v1/ai.proto) (implemented by the Python AI service, called by ATLAS). Share the `.proto` files with the other backend teams so they can generate their own code.
+- **AI service**: ATLAS calls `ProcessFeedback` from the background worker (retried with exponential backoff) and `ProcessConsultationTurn` during consultations. The Python service is stateless: every request carries all context, and ATLAS validates every answer before storing it. `go run ./cmd/fakeai` implements the contract with canned answers.
 - **Auth**: every call must send `authorization: Bearer <GRPC_AUTH_TOKEN>` metadata. In development the token may be left empty (auth disabled).
 - **Request ID**: `x-request-id` metadata is forwarded between services, so logs can be traced across backends.
 - **Health & reflection**: `grpc.health.v1.Health` is callable without a token. Reflection is only enabled outside production.
@@ -149,8 +183,9 @@ The schema is changed only through migrations; GORM `AutoMigrate` is not used.
 ## Project Layout
 
 ```
-cmd/api              entrypoint (REST + gRPC in one process)
+cmd/api              entrypoint (REST + gRPC + feedback worker in one process)
 cmd/migrate          migration CLI
+cmd/fakeai           stub of the Python AI service for local development
 proto/               gRPC contracts (.proto)
 gen/                 code generated by buf (do not edit by hand)
 internal/config      configuration from env + validation
@@ -159,6 +194,9 @@ internal/middleware  request ID, logger, recovery, security headers, CORS, body 
 internal/handler     thin REST handlers + DTOs + handleError
 internal/grpcserver  gRPC server, interceptors, RPC handlers
 internal/grpcclient  connections to other backends' gRPC servers
+internal/aiclient    service.AIClient on top of the atlas.ai.v1 gRPC client
+internal/auth        JWT issuing/verification, authenticated user in context
+internal/worker      background feedback worker (job queue in PostgreSQL)
 internal/service     business logic (shared by REST & gRPC)
 internal/repository  data access (GORM)
 internal/domain      entities / models
@@ -169,7 +207,7 @@ internal/database    GORM connection, Transactor, migration runner
 migrations/          SQL migration files
 ```
 
-The `users` module is a complete example (migration → domain → repository → service → REST handler + gRPC RPC → tests) to use as a template for new features.
+Features follow the same path: migration → domain → repository → service → REST handler (and a gRPC RPC when other backends need it) → tests. The consultation module (`internal/service/consultation*.go`) is the most complete example.
 
 ## Configuration
 

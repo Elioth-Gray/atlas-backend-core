@@ -10,18 +10,26 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	_ "time/tzdata" // the distroless image has no zoneinfo; dashboards use IANA time zones
 
 	"golang.org/x/sync/errgroup"
 
+	"atlas-backend-core/internal/aiclient"
+	"atlas-backend-core/internal/auth"
 	"atlas-backend-core/internal/config"
 	"atlas-backend-core/internal/database"
+	"atlas-backend-core/internal/grpcclient"
 	"atlas-backend-core/internal/grpcserver"
 	"atlas-backend-core/internal/logger"
 	"atlas-backend-core/internal/repository"
 	"atlas-backend-core/internal/router"
 	"atlas-backend-core/internal/server"
 	"atlas-backend-core/internal/service"
+	"atlas-backend-core/internal/worker"
 )
+
+// evidenceLimit is the number of representative opinions put in a consultation snapshot.
+const evidenceLimit = 20
 
 func main() {
 	if err := run(); err != nil {
@@ -64,16 +72,62 @@ func run() (err error) {
 	log.Info("database connected")
 
 	// Wire dependencies: repository -> service -> transports (REST handlers, gRPC servers).
+	tx := database.NewTransactor(db)
 	userRepo := repository.NewUserRepository(db)
+	shopRepo := repository.NewShopRepository(db)
+	feedbackRepo := repository.NewFeedbackRepository(db)
+	insightRepo := repository.NewInsightRepository(db)
+	consultRepo := repository.NewConsultationRepository(db)
+	memoryRepo := repository.NewMemoryRepository(db)
+	tokens := auth.NewTokenManager(cfg.Auth)
+
+	// Python AI service (Path A worker and Path B consultations).
+	var ai service.AIClient = aiclient.Disabled{}
+	if cfg.AI.Enabled() {
+		conn, err := grpcclient.New(grpcclient.Config{Target: cfg.AI.Addr, AuthToken: cfg.AI.AuthToken, TLS: cfg.AI.TLS})
+		if err != nil {
+			return fmt.Errorf("connect ai service: %w", err)
+		}
+		defer func() { err = errors.Join(err, conn.Close()) }()
+		ai = aiclient.New(conn, cfg.AI.FeedbackTimeout, cfg.AI.ConsultationTimeout)
+		log.Info("ai service configured", slog.String("addr", cfg.AI.Addr))
+	} else {
+		log.Warn("AI_GRPC_ADDR is empty: feedbacks stay queued and consultations answer 503 until it is set")
+	}
+
+	processor := service.NewFeedbackProcessor(feedbackRepo, shopRepo, insightRepo, ai, tx, cfg.Worker.CandidateLimit)
+	feedbackWorker := worker.NewFeedbackWorker(feedbackRepo, processor, cfg.Worker, log)
+	var jobNotifier service.JobNotifier
+	if cfg.AI.Enabled() {
+		jobNotifier = feedbackWorker
+	}
+
 	userSvc := service.NewUserService(userRepo)
+	authSvc := service.NewAuthService(userRepo, shopRepo, tx, tokens)
+	shopSvc := service.NewShopService(shopRepo, userRepo, tx)
+	feedbackSvc := service.NewFeedbackService(feedbackRepo, shopRepo, tx, jobNotifier)
+	insightSvc := service.NewInsightService(insightRepo, shopRepo, consultRepo)
+	consultSvc := service.NewConsultationService(consultRepo, insightRepo, shopRepo, shopRepo, memoryRepo, ai, tx,
+		service.ConsultationConfig{
+			AIEnabled:     cfg.AI.Enabled(),
+			TurnTimeout:   cfg.AI.ConsultationTimeout + config.ConsultationOverhead,
+			EvidenceLimit: evidenceLimit,
+		})
+	memorySvc := service.NewMemoryService(memoryRepo, shopRepo)
 
 	// REST API for the frontend.
 	router.SetMode(cfg.App.Env)
 	engine, err := router.InitRouter(router.Deps{
-		Config:      cfg,
-		Logger:      log,
-		DB:          sqlDB,
-		UserService: userSvc,
+		Config:              cfg,
+		Logger:              log,
+		DB:                  sqlDB,
+		Tokens:              tokens,
+		AuthService:         authSvc,
+		ShopService:         shopSvc,
+		FeedbackService:     feedbackSvc,
+		InsightService:      insightSvc,
+		ConsultationService: consultSvc,
+		MemoryService:       memorySvc,
 	})
 	if err != nil {
 		return fmt.Errorf("init router: %w", err)
@@ -96,12 +150,15 @@ func run() (err error) {
 		}
 	}
 
-	// Run both servers; if either fails, the shared context is cancelled and the other
-	// one shuts down gracefully too.
+	// Run the servers and the worker; if one fails, the shared context is cancelled and the
+	// others shut down gracefully too.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return httpSrv.Run(gctx) })
 	if grpcSrv != nil {
 		g.Go(func() error { return grpcSrv.Run(gctx) })
+	}
+	if cfg.AI.Enabled() {
+		g.Go(func() error { return feedbackWorker.Run(gctx) })
 	}
 	return g.Wait()
 }

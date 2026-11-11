@@ -16,6 +16,7 @@ These project-specific rules come first and take precedence over the generic rul
 ```
 cmd/api             entrypoint: config -> logger -> database -> wiring -> REST + gRPC servers
 cmd/migrate         migration CLI (up, down, version, force, create)
+cmd/fakeai          stub of the Python AI service (atlas.ai.v1) for local development
 proto/              gRPC contracts (.proto), the source of truth for service-to-service APIs
 gen/                code generated from proto/ by buf (committed, never edited by hand)
 internal/config     env parsing + validation
@@ -24,6 +25,9 @@ internal/middleware request ID, access log, recovery, security headers, CORS, bo
 internal/handler    thin REST handlers, request/response DTOs, handleError
 internal/grpcserver gRPC server, interceptors, thin RPC handlers, toStatus
 internal/grpcclient connections to other backends' gRPC servers
+internal/aiclient   service.AIClient over the atlas.ai.v1 client (proto <-> service types only)
+internal/auth       JWT issuing/verification, authenticated user ID in context.Context
+internal/worker     background jobs (feedback worker over the feedback_jobs table)
 internal/service    business logic shared by REST and gRPC, defines the repository interfaces it needs
 internal/repository GORM persistence, the only place that touches *gorm.DB
 internal/domain     entities (GORM models via struct tags only)
@@ -44,6 +48,9 @@ Request flow (gRPC): interceptors → RPC handler (validate, map proto ↔ servi
 - Error bodies: `{"error": {"code": "NOT_FOUND", "message": "...", "details": [{"field": "...", "message": "..."}]}}`. Codes are defined in `internal/httpx`.
 - JSON field names are `snake_case`. Timestamps are RFC 3339 in UTC. IDs are UUIDs.
 - Every list endpoint is paginated (`page`, `page_size`; max page size 100).
+- Public routes live under `/api/v1/public`, auth under `/api/v1/auth`, and everything for shop members under `/api/v1/owner` behind `middleware.RequireAuth`.
+- Tenant isolation is enforced in the services, never in handlers: every `/owner` operation resolves the shop of the requested resource and checks the caller's active `shops_users` membership. Issues have no `shop_id`; their shop is derived through `feedback_opinions -> feedbacks.shop_id`. Resources of other tenants answer `404`, exactly like missing ones.
+- Everything the AI service returns is validated in the services before it is stored (schema, referenced IDs, column limits).
 - `/healthz` is liveness (no dependencies); `/readyz` checks the database. Neither is versioned.
 
 ## gRPC (Service-to-Service)

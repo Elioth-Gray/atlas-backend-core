@@ -65,3 +65,6 @@ func Unauthorized(message string) *Error { return New(ErrUnauthorized, message) 
 
 // Forbidden returns an ErrForbidden error with the given message.
 func Forbidden(message string) *Error { return New(ErrForbidden, message) }
+
+// Unavailable returns an ErrUnavailable error with the given message.
+func Unavailable(message string) *Error { return New(ErrUnavailable, message) }
