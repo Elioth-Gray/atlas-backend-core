@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package atlas.user.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// UserService exposes ATLAS users to other backend services. Calls must carry
+// "authorization: Bearer <token>" metadata and may carry "x-request-id" for
+// cross-service log correlation.
+service UserService {
+  // GetUser returns a single user by ID.
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  // ListUsers returns one page of users, newest first.
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  // CreateUser registers a new user. Fails with ALREADY_EXISTS when the email
+  // is taken.
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  // UpdateUser changes the fields listed in update_mask.
+  rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
+  // DeleteUser removes a user.
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+}
+
+// User is a registered user of the platform.
+message User {
+  // Unique identifier (UUID). Output only, except in UpdateUserRequest where it
+  // selects the user to update.
+  string id = 1;
+  // Display name, 1 to 100 characters.
+  string name = 2;
+  // Email address, stored lower-cased and unique across users.
+  string email = 3;
+  // When the user was created. Output only.
+  google.protobuf.Timestamp create_time = 4;
+  // When the user was last modified. Output only.
+  google.protobuf.Timestamp update_time = 5;
+}
+
+// GetUserRequest selects the user to return.
+message GetUserRequest {
+  // ID (UUID) of the user.
+  string id = 1;
+}
+
+// GetUserResponse carries the requested user.
+message GetUserResponse {
+  // The requested user.
+  User user = 1;
+}
+
+// ListUsersRequest selects a page of users.
+message ListUsersRequest {
+  // 1-based page number. 0 means the first page.
+  int32 page = 1;
+  // Number of users per page, at most 100. 0 means the default (20).
+  int32 page_size = 2;
+}
+
+// ListUsersResponse is one page of users.
+message ListUsersResponse {
+  // Users on this page, newest first.
+  repeated User users = 1;
+  // Total number of users across all pages.
+  int64 total_size = 2;
+  // Page number that was returned.
+  int32 page = 3;
+  // Page size that was applied.
+  int32 page_size = 4;
+}
+
+// CreateUserRequest holds the data for a new user.
+message CreateUserRequest {
+  // Display name, 1 to 100 characters.
+  string name = 1;
+  // Email address.
+  string email = 2;
+}
+
+// CreateUserResponse carries the newly created user.
+message CreateUserResponse {
+  // The created user, including its generated ID.
+  User user = 1;
+}
+
+// UpdateUserRequest changes some fields of a user.
+message UpdateUserRequest {
+  // The user to update, identified by user.id. Only fields listed in
+  // update_mask are read.
+  User user = 1;
+  // Fields to update. Supported paths: "name", "email".
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// UpdateUserResponse carries the updated user.
+message UpdateUserResponse {
+  // The user after the update.
+  User user = 1;
+}
+
+// DeleteUserRequest selects the user to delete.
+message DeleteUserRequest {
+  // ID (UUID) of the user.
+  string id = 1;
+}
+
+// DeleteUserResponse is returned when the user was deleted.
+message DeleteUserResponse {}

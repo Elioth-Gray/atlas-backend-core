@@ -1,0 +1,53 @@
+# Production: docker compose -f compose.prod.yaml up -d   -> REST http://localhost:8000, gRPC localhost:9000
+# Stop:       docker compose -f compose.prod.yaml down
+# Reads .env (copy .env.example first and set real secrets: POSTGRES_PASSWORD, GRPC_AUTH_TOKEN)
+# Using a managed PostgreSQL? Delete the "db" service and "depends_on", and set DATABASE_URL below to it.
+name: atlas-backend-prod
+
+services:
+  api:
+    build:
+      context: .
+      target: prod
+    # Build on every up, so the running binary always matches the current source
+    pull_policy: build
+    ports:
+      - '8000:8080' # REST (frontend)
+      # gRPC (other backends). If they run on this same Docker host, attach them to this
+      # compose network instead and remove this line so the port is not public.
+      - '9000:9090'
+    env_file:
+      - path: .env
+    environment:
+      APP_ENV: production
+      HTTP_HOST: ''
+      HTTP_PORT: '8080'
+      GRPC_HOST: ''
+      GRPC_PORT: '9090'
+      GRPC_AUTH_TOKEN: ${GRPC_AUTH_TOKEN:?set GRPC_AUTH_TOKEN (at least 32 characters) in .env}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      # Pending migrations are applied on startup; a PostgreSQL advisory lock keeps concurrent starts safe
+      DB_AUTO_MIGRATE: 'true'
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    # No "ports": the database is only reachable from the api container
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:

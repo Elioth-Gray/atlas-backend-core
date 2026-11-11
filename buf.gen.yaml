@@ -1,0 +1,19 @@
+# Code generation for ./proto -> ./gen (generated code is committed).
+#   go run github.com/bufbuild/buf/cmd/buf@v1.75.0 generate
+# Plugins run through `go run` at pinned versions, so nothing needs to be
+# installed globally. Keep protoc-gen-go in step with google.golang.org/protobuf
+# in go.mod.
+version: v2
+clean: true
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: atlas-backend-core/gen
+plugins:
+  - local: ["go", "run", "google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12"]
+    out: gen
+    opt: paths=source_relative
+  - local: ["go", "run", "google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2"]
+    out: gen
+    opt: paths=source_relative

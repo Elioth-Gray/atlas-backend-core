@@ -1,0 +1,26 @@
+# Hot-reload config used by the "dev" Docker target (docker compose -f compose.dev.yaml up).
+# Also works on the host: go install github.com/air-verse/air@v1.67.4 && air
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/api ./cmd/api"
+  entrypoint = ["./tmp/api"]
+  include_ext = ["go", "sql"]
+  exclude_dir = ["tmp", "vendor", "docs", ".git", ".claude"]
+  exclude_regex = ["_test\\.go$"]
+  delay = 500 # ms
+  stop_on_error = true
+  # Give the server time to shut down gracefully before it is killed.
+  send_interrupt = true
+  kill_delay = 2000000000 # nanoseconds (2s)
+  # Bind mounts from Windows/macOS hosts do not deliver file-change events into
+  # the container, so poll instead.
+  poll = true
+  poll_interval = 500 # ms
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = true

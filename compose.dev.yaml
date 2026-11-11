@@ -1,0 +1,58 @@
+# Development: docker compose -f compose.dev.yaml up   -> REST http://localhost:3333, gRPC localhost:9090
+# Stop:        docker compose -f compose.dev.yaml down  (add -v to also wipe the database)
+# Reads .env (copy .env.example first); "environment" below overrides what must differ inside the container
+name: atlas-backend-dev
+
+services:
+  api:
+    build:
+      context: .
+      target: dev
+    # Build on every up, so changed dependencies or config never run stale (unchanged steps come from cache)
+    pull_policy: build
+    ports:
+      - '3333:8080' # REST (frontend)
+      - '9090:9090' # gRPC (other backends)
+    # Only the Go source is mounted for hot reload; go.mod, modules and .air.toml come from the image
+    volumes:
+      - ./cmd:/app/cmd
+      - ./internal:/app/internal
+      - ./migrations:/app/migrations
+      - ./gen:/app/gen
+      # Compiler cache, so a recreated container does not rebuild everything from scratch
+      - gobuild:/root/.cache/go-build
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: development
+      HTTP_HOST: ''
+      HTTP_PORT: '8080'
+      GRPC_HOST: ''
+      GRPC_PORT: '9090'
+      DATABASE_URL: postgres://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas}@db:5432/${POSTGRES_DB:-atlas}?sslmode=disable
+      DB_AUTO_MIGRATE: 'true'
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-atlas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-atlas}
+      POSTGRES_DB: ${POSTGRES_DB:-atlas}
+    ports:
+      # 5433 on the host so it does not clash with a locally installed PostgreSQL on 5432
+      - '5433:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  gobuild:

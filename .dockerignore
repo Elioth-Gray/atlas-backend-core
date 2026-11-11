@@ -1,0 +1,24 @@
+# Built inside the image
+tmp
+bin
+
+# Local only. Configuration reaches the containers at runtime through env_file / environment
+.env
+.env.*
+!.env.example
+
+.git
+.vscode
+.idea
+.claude
+docs
+coverage*
+*.test
+*.out
+*.log
+
+# Docker files are not needed inside the image
+Dockerfile
+compose.*.yaml
+.dockerignore
+README.md

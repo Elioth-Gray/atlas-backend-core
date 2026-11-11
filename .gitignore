@@ -1,0 +1,22 @@
+# Build output
+/bin/
+/tmp/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Environment files (commit only the example)
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/settings.local.json

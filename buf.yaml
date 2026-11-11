@@ -1,0 +1,13 @@
+# buf configuration for the gRPC contracts in ./proto.
+#   go run github.com/bufbuild/buf/cmd/buf@v1.75.0 lint
+#   go run github.com/bufbuild/buf/cmd/buf@v1.75.0 breaking --against '.git#branch=main'
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+    - COMMENTS
+breaking:
+  use:
+    - FILE
