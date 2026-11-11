@@ -38,14 +38,29 @@ var (
 // minProductionGRPCTokenLength is the shortest GRPC_AUTH_TOKEN accepted in production.
 const minProductionGRPCTokenLength = 32
 
+// minProductionJWTSecretLength is the shortest JWT_SECRET accepted in production.
+const minProductionJWTSecretLength = 32
+
+// ConsultationOverhead is the time a consultation turn needs on top of the AI call
+// (database reads and writes). AI_CONSULTATION_TIMEOUT plus this must fit in
+// HTTP_WRITE_TIMEOUT.
+const ConsultationOverhead = 15 * time.Second
+
+// DevJWTSecret signs tokens outside production when JWT_SECRET is empty. It is public, so
+// tokens signed with it are worthless anywhere but a developer machine.
+const DevJWTSecret = "atlas-insecure-development-jwt-secret"
+
 // Config is the root application configuration.
 type Config struct {
-	App  AppConfig
-	HTTP HTTPConfig
-	GRPC GRPCConfig
-	CORS CORSConfig
-	DB   DBConfig
-	Log  LogConfig
+	App    AppConfig
+	HTTP   HTTPConfig
+	GRPC   GRPCConfig
+	CORS   CORSConfig
+	DB     DBConfig
+	Log    LogConfig
+	Auth   AuthConfig
+	AI     AIConfig
+	Worker WorkerConfig
 }
 
 // AppConfig holds general application settings.
@@ -63,7 +78,7 @@ type HTTPConfig struct {
 	Port              int           `env:"HTTP_PORT" envDefault:"8080"`
 	ReadTimeout       time.Duration `env:"HTTP_READ_TIMEOUT" envDefault:"10s"`
 	ReadHeaderTimeout time.Duration `env:"HTTP_READ_HEADER_TIMEOUT" envDefault:"5s"`
-	WriteTimeout      time.Duration `env:"HTTP_WRITE_TIMEOUT" envDefault:"15s"`
+	WriteTimeout      time.Duration `env:"HTTP_WRITE_TIMEOUT" envDefault:"90s"`
 	IdleTimeout       time.Duration `env:"HTTP_IDLE_TIMEOUT" envDefault:"60s"`
 	ShutdownTimeout   time.Duration `env:"HTTP_SHUTDOWN_TIMEOUT" envDefault:"15s"`
 	MaxBodyBytes      int64         `env:"HTTP_MAX_BODY_BYTES" envDefault:"1048576"`
@@ -121,6 +136,39 @@ type LogConfig struct {
 	Format string `env:"LOG_FORMAT"`
 }
 
+// AuthConfig holds JWT settings for the REST API.
+type AuthConfig struct {
+	JWTSecret  string        `env:"JWT_SECRET"`
+	JWTIssuer  string        `env:"JWT_ISSUER" envDefault:"atlas-backend-core"`
+	AccessTTL  time.Duration `env:"JWT_ACCESS_TTL" envDefault:"15m"`
+	RefreshTTL time.Duration `env:"JWT_REFRESH_TTL" envDefault:"720h"`
+}
+
+// AIConfig describes the connection to the Python AI service (atlas.ai.v1.AIService).
+// An empty Addr disables every AI feature: feedback jobs stay queued and consultations
+// answer 503 until it is configured.
+type AIConfig struct {
+	Addr                string        `env:"AI_GRPC_ADDR"`
+	AuthToken           string        `env:"AI_GRPC_TOKEN"`
+	TLS                 bool          `env:"AI_GRPC_TLS" envDefault:"false"`
+	FeedbackTimeout     time.Duration `env:"AI_FEEDBACK_TIMEOUT" envDefault:"30s"`
+	ConsultationTimeout time.Duration `env:"AI_CONSULTATION_TIMEOUT" envDefault:"60s"`
+}
+
+// Enabled reports whether an AI service address is configured.
+func (c AIConfig) Enabled() bool { return c.Addr != "" }
+
+// WorkerConfig tunes the Path A feedback worker.
+type WorkerConfig struct {
+	Concurrency    int           `env:"FEEDBACK_WORKER_CONCURRENCY" envDefault:"2"`
+	PollInterval   time.Duration `env:"FEEDBACK_WORKER_POLL_INTERVAL" envDefault:"5s"`
+	MaxAttempts    int           `env:"FEEDBACK_JOB_MAX_ATTEMPTS" envDefault:"8"`
+	BaseBackoff    time.Duration `env:"FEEDBACK_JOB_BASE_BACKOFF" envDefault:"10s"`
+	MaxBackoff     time.Duration `env:"FEEDBACK_JOB_MAX_BACKOFF" envDefault:"30m"`
+	Lease          time.Duration `env:"FEEDBACK_JOB_LEASE" envDefault:"2m"`
+	CandidateLimit int           `env:"ML_CANDIDATE_VECTOR_LIMIT" envDefault:"200"`
+}
+
 // Load reads configuration from the process environment, seeded by an optional .env file
 // in the working directory. Variables already set in the environment take precedence over
 // values from .env.
@@ -156,6 +204,10 @@ func (c *Config) normalize() {
 	}
 	c.HTTP.TrustedProxies = compact(c.HTTP.TrustedProxies)
 	c.CORS.AllowedOrigins = compact(c.CORS.AllowedOrigins)
+	c.AI.Addr = strings.TrimSpace(c.AI.Addr)
+	if c.Auth.JWTSecret == "" && c.App.Env != EnvProduction {
+		c.Auth.JWTSecret = DevJWTSecret
+	}
 }
 
 // Validate reports every invalid setting at once.
@@ -171,6 +223,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("HTTP_MAX_BODY_BYTES must be positive"))
 	}
 	errs = append(errs, c.validateGRPC()...)
+	errs = append(errs, c.validateAuth()...)
+	errs = append(errs, c.validateAI()...)
 	if c.DB.MaxOpenConns < 1 {
 		errs = append(errs, errors.New("DB_MAX_OPEN_CONNS must be at least 1"))
 	}
@@ -216,6 +270,40 @@ func (c *Config) validateGRPC() []error {
 	}
 	if c.App.IsProduction() && len(g.AuthToken) < minProductionGRPCTokenLength {
 		errs = append(errs, fmt.Errorf("GRPC_AUTH_TOKEN must be at least %d characters in production", minProductionGRPCTokenLength))
+	}
+	return errs
+}
+
+func (c *Config) validateAuth() []error {
+	var errs []error
+	if c.App.IsProduction() && (len(c.Auth.JWTSecret) < minProductionJWTSecretLength || c.Auth.JWTSecret == DevJWTSecret) {
+		errs = append(errs, fmt.Errorf("JWT_SECRET must be at least %d random characters in production", minProductionJWTSecretLength))
+	}
+	if c.Auth.AccessTTL <= 0 || c.Auth.RefreshTTL <= c.Auth.AccessTTL {
+		errs = append(errs, errors.New("JWT_ACCESS_TTL must be positive and shorter than JWT_REFRESH_TTL"))
+	}
+	return errs
+}
+
+func (c *Config) validateAI() []error {
+	var errs []error
+	if c.AI.FeedbackTimeout <= 0 || c.AI.ConsultationTimeout <= 0 {
+		errs = append(errs, errors.New("AI_FEEDBACK_TIMEOUT and AI_CONSULTATION_TIMEOUT must be positive"))
+	}
+	// The consultation endpoints wait for the AI, so the HTTP response must outlive it.
+	if c.AI.ConsultationTimeout+ConsultationOverhead > c.HTTP.WriteTimeout {
+		errs = append(errs, fmt.Errorf("AI_CONSULTATION_TIMEOUT must be at least %s shorter than HTTP_WRITE_TIMEOUT", ConsultationOverhead))
+	}
+	w := c.Worker
+	if w.Concurrency < 1 || w.MaxAttempts < 1 || w.CandidateLimit < 0 {
+		errs = append(errs, errors.New("FEEDBACK_WORKER_CONCURRENCY and FEEDBACK_JOB_MAX_ATTEMPTS must be at least 1, ML_CANDIDATE_VECTOR_LIMIT at least 0"))
+	}
+	if w.PollInterval <= 0 || w.BaseBackoff <= 0 || w.MaxBackoff < w.BaseBackoff {
+		errs = append(errs, errors.New("FEEDBACK_WORKER_POLL_INTERVAL and FEEDBACK_JOB_BASE_BACKOFF must be positive and FEEDBACK_JOB_MAX_BACKOFF at least the base backoff"))
+	}
+	// A job lease shorter than the AI call would let a second worker grab a running job.
+	if w.Lease <= c.AI.FeedbackTimeout {
+		errs = append(errs, errors.New("FEEDBACK_JOB_LEASE must be longer than AI_FEEDBACK_TIMEOUT"))
 	}
 	return errs
 }

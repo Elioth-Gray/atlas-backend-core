@@ -1,0 +1,433 @@
+syntax = "proto3";
+
+package atlas.ai.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// AIService is implemented by the stateless Python NLP/ML + LLM service and
+// called by the Go backend core. Go owns every piece of state (PostgreSQL):
+// each request carries all the context the AI needs, and each response is
+// validated by Go before anything is stored.
+//
+// Calls carry "authorization: Bearer <token>" and "x-request-id" metadata.
+service AIService {
+  // ProcessFeedback extracts opinions from one customer feedback (Path A,
+  // async worker): aspects, sentiment, severity, embeddings, and the issue
+  // cluster each opinion belongs to. Go retries with exponential backoff on
+  // UNAVAILABLE / DEADLINE_EXCEEDED, so the call must be safe to repeat.
+  rpc ProcessFeedback(ProcessFeedbackRequest) returns (ProcessFeedbackResponse);
+  // ProcessConsultationTurn runs one turn of the guided consultation (Path B,
+  // synchronous): it returns either the next question for the owner or a
+  // structured solution.
+  rpc ProcessConsultationTurn(ProcessConsultationTurnRequest) returns (ProcessConsultationTurnResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Shared enums
+// ---------------------------------------------------------------------------
+
+// Sentiment of a single opinion.
+enum Sentiment {
+  // Not set. Rejected by Go.
+  SENTIMENT_UNSPECIFIED = 0;
+  // Negative opinion (complaint).
+  SENTIMENT_NEGATIVE = 1;
+  // Positive opinion (praise).
+  SENTIMENT_POSITIVE = 2;
+  // Neutral opinion.
+  SENTIMENT_NEUTRAL = 3;
+}
+
+// Severity of a single opinion. The database only distinguishes severe
+// opinions; anything other than SEVERITY_SEVERE is stored as "not severe".
+enum Severity {
+  // Not assessed. Stored as not severe.
+  SEVERITY_UNSPECIFIED = 0;
+  // Severe: needs urgent attention.
+  SEVERITY_SEVERE = 1;
+  // Explicitly not severe.
+  SEVERITY_NOT_SEVERE = 2;
+}
+
+// ---------------------------------------------------------------------------
+// ProcessFeedback (Path A)
+// ---------------------------------------------------------------------------
+
+// ProcessFeedbackRequest carries one new feedback and the existing clusters of
+// the same shop so the AI can assign opinions to existing or new issues.
+message ProcessFeedbackRequest {
+  // Shop the feedback belongs to (UUID).
+  string shop_id = 1;
+  // The feedback to analyse.
+  Feedback feedback = 2;
+  // Public profile of the shop, as extra context.
+  ShopProfile shop = 3;
+  // Existing issues (clusters) of this shop.
+  repeated CandidateIssue candidate_issues = 4;
+  // Recent opinion embeddings of this shop, each tagged with its issue, for
+  // similarity-based cluster assignment.
+  repeated CandidateVector candidate_vectors = 5;
+}
+
+// Feedback is a customer review submitted through the shop's QR page.
+message Feedback {
+  // Feedback ID (UUID).
+  string id = 1;
+  // Customer name, may be empty.
+  string customer_name = 2;
+  // Rating from 1.0 to 5.0.
+  double rating = 3;
+  // Review text.
+  string text = 4;
+  // When the feedback was submitted.
+  google.protobuf.Timestamp create_time = 5;
+}
+
+// CandidateIssue is an existing issue cluster of the shop.
+message CandidateIssue {
+  // Issue ID (UUID).
+  string issue_id = 1;
+  // Issue title.
+  string title = 2;
+  // Number of opinions currently in the issue.
+  int64 opinion_count = 3;
+}
+
+// CandidateVector is the embedding of an existing opinion.
+message CandidateVector {
+  // Opinion ID (UUID).
+  string opinion_id = 1;
+  // Issue the opinion belongs to (UUID), empty when unassigned.
+  string issue_id = 2;
+  // Embedding values.
+  repeated float embedding = 3;
+  // Model that produced the embedding.
+  string embedding_model = 4;
+}
+
+// ProcessFeedbackResponse lists the opinions extracted from the feedback.
+// An empty list is valid (nothing actionable in the text).
+message ProcessFeedbackResponse {
+  // Extracted opinions.
+  repeated ExtractedOpinion opinions = 1;
+}
+
+// ExtractedOpinion is one aspect-level opinion found in a feedback.
+message ExtractedOpinion {
+  // Normalised opinion, e.g. "Waiting time is too long". Required.
+  string opinion_text = 1;
+  // Verbatim quote from the feedback supporting the opinion.
+  string evidence_text = 2;
+  // Sentiment. Required.
+  Sentiment sentiment = 3;
+  // Severity.
+  Severity severity = 4;
+  // Embedding of opinion_text. Required.
+  repeated float embedding = 5;
+  // Model that produced the embedding. Required.
+  string embedding_model = 6;
+  // Issue the opinion is assigned to.
+  IssueAssignment issue = 7;
+}
+
+// IssueAssignment assigns an opinion to an existing issue or a new one.
+// Opinions of the same response with the same new_issue_title share one new
+// issue. When existing_issue_id is not an issue of the shop, Go falls back to
+// creating a new issue with new_issue_title, so always send a title.
+message IssueAssignment {
+  // Existing issue ID (UUID) from candidate_issues, or empty for a new issue.
+  string existing_issue_id = 1;
+  // Title of the issue. Required.
+  string new_issue_title = 2;
+}
+
+// ShopProfile describes the shop.
+message ShopProfile {
+  // Shop ID (UUID).
+  string id = 1;
+  // Shop name.
+  string name = 2;
+  // Shop description.
+  string description = 3;
+  // Business category, e.g. "Kafe".
+  string category = 4;
+  // Business scale, e.g. "Mikro".
+  string scale = 5;
+}
+
+// ---------------------------------------------------------------------------
+// ProcessConsultationTurn (Path B)
+// ---------------------------------------------------------------------------
+
+// ConsultationEvent is what triggered the turn.
+enum ConsultationEvent {
+  // Not set. Never sent.
+  CONSULTATION_EVENT_UNSPECIFIED = 0;
+  // A new session starts: ask the first question, or answer right away when
+  // the evidence is already sufficient.
+  CONSULTATION_EVENT_START = 1;
+  // The owner answered the last question (the newest OWNER message).
+  CONSULTATION_EVENT_OWNER_REPLY = 2;
+  // The owner skipped the last question (its topic is in skipped_topics).
+  CONSULTATION_EVENT_SKIP_QUESTION = 3;
+  // The owner wants the solution now.
+  CONSULTATION_EVENT_GENERATE_NOW = 4;
+  // The owner wants to revise or discuss the current solution (the newest
+  // OWNER message holds the request).
+  CONSULTATION_EVENT_CONTINUE_DISCUSSION = 5;
+}
+
+// ProcessConsultationTurnRequest carries the complete state of a session.
+message ProcessConsultationTurnRequest {
+  // Session ID (UUID).
+  string session_id = 1;
+  // Turn request ID (UUID), stable across retries of the same turn.
+  string request_id = 2;
+  // What triggered this turn.
+  ConsultationEvent event = 3;
+  // Evidence snapshot captured when the session started.
+  ContextSnapshot context = 4;
+  // Every message of the session in order, including the owner message of
+  // this turn.
+  repeated ConversationMessage messages = 5;
+  // Topic keys already asked.
+  repeated string asked_topics = 6;
+  // Topic keys the owner skipped.
+  repeated string skipped_topics = 7;
+  // Latest solution of the session, if any.
+  Solution previous_solution = 8;
+  // Number of questions asked so far.
+  int32 question_count = 9;
+}
+
+// ContextSnapshot is the static evidence assembled by Go from SQL.
+message ContextSnapshot {
+  // The issue being consulted.
+  IssueSummary issue = 1;
+  // Time span covered by the evidence.
+  Period period = 2;
+  // Aggregate statistics of the issue.
+  IssueStats stats = 3;
+  // Representative opinions. Solutions may only cite these opinion IDs.
+  repeated EvidenceOpinion evidence = 4;
+  // Shop profile.
+  ShopProfile shop = 5;
+  // Active business memories. Solutions may only cite these memory IDs.
+  repeated BusinessMemory memories = 6;
+  // Final solution of the most recent archived session on this issue.
+  PriorSolution prior_issue_solution = 7;
+}
+
+// IssueSummary identifies an issue.
+message IssueSummary {
+  // Issue ID (UUID).
+  string id = 1;
+  // Issue title.
+  string title = 2;
+}
+
+// Period is a time range.
+message Period {
+  // Start of the range.
+  google.protobuf.Timestamp start_time = 1;
+  // End of the range.
+  google.protobuf.Timestamp end_time = 2;
+}
+
+// IssueStats aggregates the opinions of an issue. Unique feedbacks and
+// opinions are counted separately because one feedback can yield several
+// opinions.
+message IssueStats {
+  // Number of distinct feedbacks.
+  int64 unique_feedback_count = 1;
+  // Number of opinions.
+  int64 opinion_count = 2;
+  // Average rating of the distinct feedbacks.
+  double average_rating = 3;
+  // Opinions with negative sentiment.
+  int64 negative_count = 4;
+  // Opinions with positive sentiment.
+  int64 positive_count = 5;
+  // Opinions with neutral sentiment.
+  int64 neutral_count = 6;
+  // Opinions marked severe.
+  int64 severe_count = 7;
+  // Opinions not marked severe.
+  int64 not_severe_count = 8;
+}
+
+// EvidenceOpinion is one opinion with its source feedback.
+message EvidenceOpinion {
+  // Opinion ID (UUID), citable in solutions.
+  string opinion_id = 1;
+  // Normalised opinion.
+  string opinion_text = 2;
+  // Verbatim quote.
+  string evidence_text = 3;
+  // Sentiment.
+  Sentiment sentiment = 4;
+  // Severity.
+  Severity severity = 5;
+  // Full feedback text.
+  string full_feedback = 6;
+  // Rating of the feedback.
+  double rating = 7;
+  // When the feedback was submitted.
+  google.protobuf.Timestamp create_time = 8;
+}
+
+// BusinessMemory is a fact about the business confirmed by the owner.
+message BusinessMemory {
+  // Memory ID (UUID), citable in solutions.
+  string id = 1;
+  // The fact.
+  string fact_text = 2;
+}
+
+// PriorSolution is the final solution of an earlier archived session.
+message PriorSolution {
+  // Session ID (UUID).
+  string session_id = 1;
+  // When that session was archived.
+  google.protobuf.Timestamp archive_time = 2;
+  // The solution.
+  Solution solution = 3;
+}
+
+// MessageRole is the author of a conversation message.
+enum MessageRole {
+  // Not set.
+  MESSAGE_ROLE_UNSPECIFIED = 0;
+  // The shop owner.
+  MESSAGE_ROLE_OWNER = 1;
+  // The ATLAS AI.
+  MESSAGE_ROLE_ATLAS_AI = 2;
+}
+
+// ConversationMessage is one stored message of the session.
+message ConversationMessage {
+  // Message ID (UUID). OWNER message IDs are citable in solutions and memory
+  // candidates.
+  string id = 1;
+  // Author.
+  MessageRole role = 2;
+  // Text content (questions and owner messages).
+  string content = 3;
+  // Solution content (solution messages).
+  Solution solution = 4;
+  // Topic key of an AI question.
+  string topic_key = 5;
+  // When the message was created.
+  google.protobuf.Timestamp create_time = 6;
+}
+
+// ProcessConsultationTurnResponse is either a question or a solution.
+message ProcessConsultationTurnResponse {
+  // The turn result.
+  oneof result {
+    // Ask the owner another question.
+    NextQuestion next_question = 1;
+    // Present a solution.
+    Solution solution = 2;
+  }
+  // Business facts stated by the owner in this session, proposed for
+  // confirmation. Each must cite OWNER message IDs.
+  repeated MemoryCandidate memory_candidates = 3;
+  // Gemini model used, e.g. "gemini-2.5-pro".
+  string model_id = 4;
+  // Prompt version used.
+  string prompt_version = 5;
+}
+
+// NextQuestion asks the owner for more context.
+message NextQuestion {
+  // Stable key of the topic, e.g. "staffing". Required.
+  string topic_key = 1;
+  // Question text. Required.
+  string text = 2;
+}
+
+// MemoryCandidate is a proposed business memory.
+message MemoryCandidate {
+  // The fact, e.g. "Only two baristas work on weekends". Required.
+  string fact_text = 1;
+  // OWNER message IDs the fact comes from. At least one.
+  repeated string source_owner_message_ids = 2;
+}
+
+// References cite the sources of a statement. Every ID must exist in the
+// request (evidence opinions, OWNER messages, active memories); Go rejects the
+// whole solution otherwise.
+message References {
+  // Opinion IDs from ContextSnapshot.evidence.
+  repeated string opinion_ids = 1;
+  // OWNER message IDs from messages.
+  repeated string owner_message_ids = 2;
+  // Memory IDs from ContextSnapshot.memories.
+  repeated string memory_ids = 3;
+}
+
+// Solution is the structured result of a consultation. All five components
+// must be non-empty.
+message Solution {
+  // What the evidence shows.
+  repeated Finding findings = 1;
+  // Customer quotes backing the findings.
+  repeated CustomerEvidence customer_evidence = 2;
+  // Likely root causes.
+  repeated Hypothesis hypotheses = 3;
+  // Concrete actions.
+  repeated Recommendation recommendations = 4;
+  // How to measure success.
+  repeated SuccessIndicator success_indicators = 5;
+}
+
+// Finding is an observation grounded in evidence.
+message Finding {
+  // The observation. Required.
+  string statement = 1;
+  // Sources.
+  References references = 2;
+}
+
+// CustomerEvidence quotes one opinion.
+message CustomerEvidence {
+  // Opinion ID (UUID) from ContextSnapshot.evidence. Required.
+  string opinion_id = 1;
+  // Quote. Required.
+  string quote = 2;
+  // Why the quote matters.
+  string note = 3;
+}
+
+// Hypothesis is a likely root cause.
+message Hypothesis {
+  // The hypothesis. Required.
+  string statement = 1;
+  // Confidence label, e.g. "high", "medium", "low".
+  string confidence = 2;
+  // Sources.
+  References references = 3;
+}
+
+// Recommendation is an action for the owner.
+message Recommendation {
+  // Short title. Required.
+  string title = 1;
+  // Details.
+  string description = 2;
+  // Priority label, e.g. "high".
+  string priority = 3;
+  // Sources.
+  References references = 4;
+}
+
+// SuccessIndicator is a measurable target.
+message SuccessIndicator {
+  // What to measure. Required.
+  string metric = 1;
+  // Target value.
+  string target = 2;
+  // When to evaluate.
+  string timeframe = 3;
+}

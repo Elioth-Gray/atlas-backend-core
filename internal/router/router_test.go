@@ -8,13 +8,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"atlas-backend-core/internal/auth"
 	"atlas-backend-core/internal/config"
 	"atlas-backend-core/internal/httpx"
 	"atlas-backend-core/internal/requestid"
-	"atlas-backend-core/internal/service"
 )
 
 func TestMain(m *testing.M) {
@@ -37,8 +38,8 @@ func newTestEngine(t *testing.T) *gin.Engine {
 		Config: cfg,
 		Logger: slog.New(slog.DiscardHandler),
 		DB:     okPinger{},
-		// The user service is never reached by these tests.
-		UserService: service.NewUserService(nil),
+		Tokens: auth.NewTokenManager(config.AuthConfig{JWTSecret: "test-secret", JWTIssuer: "test", AccessTTL: time.Minute, RefreshTTL: time.Hour}),
+		// Services are never reached by these tests.
 	})
 	if err != nil {
 		t.Fatalf("InitRouter: %v", err)
@@ -54,20 +55,26 @@ func TestInitRouter(t *testing.T) {
 		method     string
 		path       string
 		origin     string
+		bearer     string
 		wantStatus int
 		wantCode   string
 	}{
 		{name: "liveness", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK},
 		{name: "readiness", method: http.MethodGet, path: "/readyz", wantStatus: http.StatusOK},
 		{name: "unknown route", method: http.MethodGet, path: "/nope", wantStatus: http.StatusNotFound, wantCode: httpx.CodeRouteNotFound},
-		{name: "wrong method", method: http.MethodPut, path: "/api/v1/users", wantStatus: http.StatusMethodNotAllowed, wantCode: httpx.CodeMethodNotAllowed},
-		{name: "invalid id reaches validation", method: http.MethodGet, path: "/api/v1/users/x", wantStatus: http.StatusBadRequest, wantCode: httpx.CodeValidation},
-		{name: "cors preflight from allowed origin", method: http.MethodOptions, path: "/api/v1/users", origin: "http://localhost:3000", wantStatus: http.StatusNoContent},
+		{name: "wrong method", method: http.MethodPut, path: "/api/v1/auth/login", wantStatus: http.StatusMethodNotAllowed, wantCode: httpx.CodeMethodNotAllowed},
+		{name: "invalid id reaches validation", method: http.MethodGet, path: "/api/v1/public/shops/x", wantStatus: http.StatusBadRequest, wantCode: httpx.CodeValidation},
+		{name: "owner routes require a token", method: http.MethodGet, path: "/api/v1/owner/shops", wantStatus: http.StatusUnauthorized, wantCode: httpx.CodeUnauthorized},
+		{name: "owner routes reject a bad token", method: http.MethodGet, path: "/api/v1/owner/shops", bearer: "nope", wantStatus: http.StatusUnauthorized, wantCode: httpx.CodeUnauthorized},
+		{name: "cors preflight from allowed origin", method: http.MethodOptions, path: "/api/v1/auth/login", origin: "http://localhost:3000", wantStatus: http.StatusNoContent},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, nil)
+			if tt.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.bearer)
+			}
 			if tt.origin != "" {
 				req.Header.Set("Origin", tt.origin)
 				req.Header.Set("Access-Control-Request-Method", http.MethodPost)

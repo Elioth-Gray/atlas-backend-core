@@ -6,7 +6,7 @@ COMPOSE_DEV  := docker compose -f compose.dev.yaml
 COMPOSE_PROD := docker compose -f compose.prod.yaml
 BUF          := go run github.com/bufbuild/buf/cmd/buf@v1.75.0
 
-.PHONY: help run build test test-race cover lint fmt tidy \
+.PHONY: help run fakeai build test test-race cover lint fmt tidy \
         proto proto-lint proto-breaking \
         migrate-up migrate-down migrate-version migrate-create \
         dev dev-db dev-down dev-logs dev-migrate prod-up prod-down prod-logs prod-migrate
@@ -17,6 +17,9 @@ help: ## List available targets
 # --- Go (host) ----------------------------------------------------------------
 run: ## Run the API on the host (reads .env)
 	go run ./cmd/api
+
+fakeai: ## Run the AI service stub on :50051 (set AI_GRPC_ADDR=localhost:50051)
+	go run ./cmd/fakeai
 
 build: ## Build binaries into ./bin
 	go build -o bin/api ./cmd/api

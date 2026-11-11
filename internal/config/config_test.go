@@ -23,7 +23,7 @@ func TestFromMap(t *testing.T) {
 		{name: "defaults are valid", env: base(nil), wantFormat: LogFormatText},
 		{
 			name:       "production defaults to json logs",
-			env:        base(map[string]string{"APP_ENV": "production", "GRPC_AUTH_TOKEN": strings.Repeat("x", 32)}),
+			env:        base(map[string]string{"APP_ENV": "production", "GRPC_AUTH_TOKEN": strings.Repeat("x", 32), "JWT_SECRET": strings.Repeat("s", 32)}),
 			wantFormat: LogFormatJSON,
 		},
 		{name: "missing database url", env: map[string]string{}, wantErr: "DATABASE_URL"},
@@ -42,7 +42,7 @@ func TestFromMap(t *testing.T) {
 		},
 		{
 			name:       "production with grpc disabled needs no token",
-			env:        base(map[string]string{"APP_ENV": "production", "GRPC_ENABLED": "false"}),
+			env:        base(map[string]string{"APP_ENV": "production", "GRPC_ENABLED": "false", "JWT_SECRET": strings.Repeat("s", 32)}),
 			wantFormat: LogFormatJSON,
 		},
 		{
@@ -54,6 +54,21 @@ func TestFromMap(t *testing.T) {
 			name:    "grpc tls needs both files",
 			env:     base(map[string]string{"GRPC_TLS_CERT_FILE": "cert.pem"}),
 			wantErr: "GRPC_TLS_CERT_FILE",
+		},
+		{
+			name:    "production requires a strong jwt secret",
+			env:     base(map[string]string{"APP_ENV": "production", "GRPC_AUTH_TOKEN": strings.Repeat("x", 32)}),
+			wantErr: "JWT_SECRET",
+		},
+		{
+			name:    "ai timeout must fit in the http write timeout",
+			env:     base(map[string]string{"AI_CONSULTATION_TIMEOUT": "2m", "HTTP_WRITE_TIMEOUT": "1m"}),
+			wantErr: "AI_CONSULTATION_TIMEOUT",
+		},
+		{
+			name:    "job lease must outlive the ai call",
+			env:     base(map[string]string{"FEEDBACK_JOB_LEASE": "10s", "AI_FEEDBACK_TIMEOUT": "30s"}),
+			wantErr: "FEEDBACK_JOB_LEASE",
 		},
 		{
 			name:    "origin without scheme",

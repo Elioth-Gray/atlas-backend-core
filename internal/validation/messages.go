@@ -23,6 +23,8 @@ func Message(fe validator.FieldError) string {
 		return "must be a valid UUID"
 	case "url", "http_url":
 		return "must be a valid URL"
+	case "datetime":
+		return "must be a date/time in the format " + param
 	case "oneof":
 		return "must be one of: " + strings.ReplaceAll(param, " ", ", ")
 	case "min":

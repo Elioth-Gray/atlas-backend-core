@@ -32,12 +32,32 @@ services:
       GRPC_PORT: '9090'
       DATABASE_URL: postgres://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas}@db:5432/${POSTGRES_DB:-atlas}?sslmode=disable
       DB_AUTO_MIGRATE: 'true'
+      # Python AI service. Defaults to the fakeai stub below; point DOCKER_AI_GRPC_ADDR in .env
+      # at the real service (e.g. host.docker.internal:50051) when it runs.
+      AI_GRPC_ADDR: ${DOCKER_AI_GRPC_ADDR:-fakeai:50051}
     depends_on:
       db:
         condition: service_healthy
 
+  # Deterministic stand-in for the Python AI service (cmd/fakeai), so the feedback worker and
+  # the consultation flow work without it. Set FAKEAI_DELAY (e.g. 3s) to simulate slow turns.
+  fakeai:
+    build:
+      context: .
+      target: dev
+    pull_policy: build
+    command: ['go', 'run', './cmd/fakeai']
+    volumes:
+      - ./cmd:/app/cmd
+      - ./gen:/app/gen
+      - gobuild:/root/.cache/go-build
+    environment:
+      FAKEAI_ADDR: ':50051'
+      FAKEAI_DELAY: ${FAKEAI_DELAY:-0s}
+
   db:
-    image: postgres:17-alpine
+    # PostgreSQL 17 with the pgvector extension (opinion embeddings)
+    image: pgvector/pgvector:0.8.0-pg17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-atlas}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-atlas}

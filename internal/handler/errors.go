@@ -47,7 +47,15 @@ func mapError(err error) (int, httpx.APIError) {
 	var (
 		tooLarge *http.MaxBytesError
 		bindErr  *bindError
+		paramErr *paramError
 	)
+	if errors.As(err, &paramErr) {
+		return http.StatusBadRequest, httpx.APIError{
+			Code:    httpx.CodeValidation,
+			Message: "request validation failed",
+			Details: []httpx.FieldError{{Field: paramErr.field, Message: paramErr.message}},
+		}
+	}
 	if details, ok := httpx.AsValidationErrors(err); ok {
 		return http.StatusBadRequest, httpx.APIError{
 			Code:    httpx.CodeValidation,
