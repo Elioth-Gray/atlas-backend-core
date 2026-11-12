@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"atlas-backend-core/api"
 	"atlas-backend-core/internal/config"
 	"atlas-backend-core/internal/handler"
 	"atlas-backend-core/internal/httpx"
@@ -72,6 +73,14 @@ func InitRouter(deps Deps) (*gin.Engine, error) {
 	health := handler.NewHealthHandler(deps.DB)
 	r.GET("/healthz", health.Live)
 	r.GET("/readyz", health.Ready)
+
+	// The API contract and Swagger UI are for development; production does not expose them.
+	if !cfg.App.IsProduction() {
+		docs := handler.NewDocsHandler(api.OpenAPI)
+		r.GET("/docs", docs.UI)
+		r.GET("/docs/init.js", docs.InitJS)
+		r.GET("/docs/openapi.yaml", docs.Spec)
+	}
 
 	v1 := r.Group("/api/v1")
 	shops := handler.NewShopHandler(deps.ShopService, deps.FeedbackService)

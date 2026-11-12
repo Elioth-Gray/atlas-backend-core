@@ -73,6 +73,18 @@ services:
       timeout: 3s
       retries: 10
 
+  # Web UI to browse and edit the dev database (like Prisma Studio): http://localhost:8081
+  dbviewer:
+    image: sosedoff/pgweb:0.16.2
+    command: ['pgweb', '--bind=0.0.0.0', '--listen=8081', '--skip-open']
+    environment:
+      PGWEB_DATABASE_URL: postgres://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas}@db:5432/${POSTGRES_DB:-atlas}?sslmode=disable
+    ports:
+      - '8081:8081'
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:
   gobuild:

@@ -1,0 +1,1375 @@
+openapi: 3.0.3
+info:
+  title: ATLAS Backend Core – REST API
+  version: 1.0.0
+  description: |
+    REST contract between the ATLAS frontend and `atlas-backend-core`.
+
+    ## Conventions
+    - All bodies are JSON (`Content-Type: application/json`). Field names are `snake_case`.
+    - IDs are UUID strings. Timestamps are RFC 3339 (UTC). Calendar dates are `YYYY-MM-DD`.
+    - Success envelope: `{"data": ...}`. List envelope: `{"data": [...], "meta": {...}}`.
+    - Error envelope: `{"error": {"code", "message", "details?"}}`. `code` is machine-readable
+      (see `ErrorCode`); `message` is safe to display. `details` lists field-level validation
+      failures (only for `VALIDATION_ERROR`).
+    - Every response carries an `X-Request-ID` header. Clients may send their own
+      `X-Request-ID`; quote it when reporting problems.
+    - Pagination: `page` (default 1) and `page_size` (default 20, max 100).
+    - Nullable fields are always present and set to `null` when empty (not omitted).
+
+    ## Authentication
+    `/api/v1/owner/**` requires `Authorization: Bearer <access_token>`. Access tokens are
+    short-lived (default 15 minutes); call `POST /api/v1/auth/refresh` with the refresh token
+    to get a new pair. Refresh tokens rotate: only the most recently issued one is valid.
+
+    ## Tenant isolation
+    Owner endpoints answer `404 NOT_FOUND` (not 403) when the resource belongs to a shop the
+    user is not a member of. `403 FORBIDDEN` means the user is a member but lacks the role.
+
+    ## Idempotency (consultations)
+    Consultation writes take a client-generated `request_id` (UUID v4). Reuse the same
+    `request_id` when retrying after a timeout or network error: the server returns the stored
+    result instead of calling the AI again. Use a new `request_id` for every new action.
+servers:
+  - url: http://localhost:3333
+    description: Local (host, `go run ./cmd/api`) and Docker dev
+  - url: http://localhost:8000
+    description: Docker production stack
+tags:
+  - name: Health
+    description: Liveness and readiness probes.
+  - name: Public
+    description: Unauthenticated endpoints used by the customer QR page and the register form.
+  - name: Auth
+    description: Registration, login, and token refresh.
+  - name: Shops
+    description: Shops the authenticated user belongs to.
+  - name: Insights
+    description: Dashboard and issues ("planets").
+  - name: Consultations
+    description: Guided AI consultation on an issue.
+  - name: Memories
+    description: Business facts confirmed by the owner and reused in later consultations.
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      operationId: healthLive
+      security: []
+      responses:
+        '200':
+          description: The process is up.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+              example: { status: ok }
+
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      description: Checks that the database is reachable.
+      operationId: healthReady
+      security: []
+      responses:
+        '200':
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+              example: { status: ok, checks: { database: ok } }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  # ---------------------------------------------------------------- Public
+  /api/v1/public/shop-categories:
+    get:
+      tags: [Public]
+      summary: List shop categories
+      description: |
+        Master data for the register and shop profile forms. Only enabled categories are
+        listed and accepted; for now that is just `Bakery`.
+      operationId: listShopCategories
+      security: []
+      responses:
+        '200':
+          description: Enabled categories.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Lookup' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/public/shop-scales:
+    get:
+      tags: [Public]
+      summary: List shop scales
+      description: Master data for the register and shop profile forms.
+      operationId: listShopScales
+      security: []
+      responses:
+        '200':
+          description: All scales.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Lookup' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/public/shops/{shopId}:
+    get:
+      tags: [Public]
+      summary: Get a shop's public profile
+      description: What a customer sees after scanning the shop's QR code.
+      operationId: getPublicShop
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShopId'
+      responses:
+        '200':
+          description: The shop.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/PublicShop' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/public/shops/{shopId}/feedbacks:
+    post:
+      tags: [Public]
+      summary: Submit customer feedback
+      description: |
+        Stores the feedback and answers immediately. Sentiment analysis and issue clustering
+        run in the background, so the feedback appears in issues and dashboard opinion
+        counts a bit later.
+      operationId: submitFeedback
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShopId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitFeedbackRequest' }
+            example: { name: Budi, rating: 4.5, feedback: Kopinya enak tapi antreannya lama., image: null }
+      responses:
+        '201':
+          description: Feedback stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/FeedbackCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ---------------------------------------------------------------- Auth
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register an owner and their shop
+      description: Creates the user, the shop, and the Owner membership, then logs the user in.
+      operationId: register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Registered and logged in. `shop` is the newly created shop.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: '`CONFLICT` – the email is already registered.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example: { error: { code: CONFLICT, message: email is already registered } }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email and password
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in. `shop` is omitted on login; use `GET /owner/shops`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: '`UNAUTHORIZED` – invalid email or password.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example: { error: { code: UNAUTHORIZED, message: invalid email or password } }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Exchange a refresh token for a new token pair
+      description: The old refresh token stops working once a new one is issued.
+      operationId: refreshToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: New token pair.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: '`UNAUTHORIZED` – invalid or expired refresh token. Send the user to login.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example: { error: { code: UNAUTHORIZED, message: invalid or expired refresh token } }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ---------------------------------------------------------------- Owner: shops
+  /api/v1/owner/shops:
+    get:
+      tags: [Shops]
+      summary: List my shops
+      operationId: listMyShops
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Shops the user is a member of, with their role.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/MyShop' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/owner/shops/{shopId}:
+    get:
+      tags: [Shops]
+      summary: Get one of my shops
+      operationId: getMyShop
+      parameters:
+        - $ref: '#/components/parameters/ShopId'
+      responses:
+        '200':
+          description: The shop, my role, and the owner's contact details.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ShopDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      tags: [Shops]
+      summary: Update a shop profile (Owner only)
+      description: |
+        Replaces the whole shop profile (send every field; omitted optional fields become
+        `null`). `owner` optionally updates the owner's contact details: omitted fields
+        inside `owner` are unchanged and an empty `phone_number` clears it.
+      operationId: updateMyShop
+      parameters:
+        - $ref: '#/components/parameters/ShopId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateShopRequest' }
+      responses:
+        '200':
+          description: The updated shop.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ShopDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ---------------------------------------------------------------- Owner: insights
+  /api/v1/owner/shops/{shopId}/dashboard:
+    get:
+      tags: [Insights]
+      summary: Shop dashboard
+      description: |
+        KPIs, daily sentiment trend, weekly reviews, top 5 complaints, and the 10 most recent
+        feedbacks. `from`/`to` are inclusive calendar days in `tz`. Default range: the last 30
+        days ending today. Maximum range: 366 days.
+      operationId: getDashboard
+      parameters:
+        - $ref: '#/components/parameters/ShopId'
+        - name: from
+          in: query
+          schema: { type: string, format: date, example: '2026-10-14' }
+        - name: to
+          in: query
+          schema: { type: string, format: date, example: '2026-11-12' }
+        - name: tz
+          in: query
+          description: IANA time zone.
+          schema: { type: string, maxLength: 64, default: Asia/Jakarta }
+      responses:
+        '200':
+          description: The dashboard.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Dashboard' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/owner/shops/{shopId}/issues:
+    get:
+      tags: [Insights]
+      summary: List issues ("planets") of a shop
+      operationId: listIssues
+      parameters:
+        - $ref: '#/components/parameters/ShopId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Issues with their statistics.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/IssueSummary' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/owner/issues/{issueId}:
+    get:
+      tags: [Insights]
+      summary: Issue detail
+      description: The issue, its supporting evidence (opinions with their source feedback), and its consultation history.
+      operationId: getIssue
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: The issue.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/IssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ---------------------------------------------------------------- Owner: consultations
+  /api/v1/owner/issues/{issueId}/consultations:
+    post:
+      tags: [Consultations]
+      summary: Start a consultation on an issue
+      description: |
+        Captures the evidence snapshot and asks the AI for its first move (a question or,
+        if the context suffices, a solution). This call waits for the AI and can take several
+        seconds.
+
+        Answers `201` for a new session and `200` (with `replayed: true`) when `request_id`
+        was already processed.
+      operationId: startConsultation
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartConsultationRequest' }
+      responses:
+        '200':
+          description: Replay of an already processed `request_id`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Session' }
+        '201':
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+        '504': { $ref: '#/components/responses/Timeout' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/owner/consultations/{sessionId}:
+    get:
+      tags: [Consultations]
+      summary: Get a consultation session with all messages
+      description: |
+        Use it to reload after a `409 CONFLICT` and to poll while `is_processing` is true
+        (e.g. after the client lost the response of a turn).
+      operationId: getConsultation
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: The session.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/owner/consultations/{sessionId}/turns:
+    post:
+      tags: [Consultations]
+      summary: Send an owner turn
+      description: |
+        Allowed events per session status:
+
+        | status               | allowed events                                   | `content` |
+        |----------------------|--------------------------------------------------|-----------|
+        | `COLLECTING_CONTEXT` | `OWNER_REPLY`, `SKIP_QUESTION`, `GENERATE_NOW`   | required for `OWNER_REPLY` |
+        | `SOLUTION_READY`     | `CONTINUE_DISCUSSION`, `GENERATE_NOW`            | required for `CONTINUE_DISCUSSION` |
+        | `ARCHIVED`           | none                                             | |
+
+        `state_version` must equal the session's current `state_version` (optimistic
+        locking); a stale value answers `409`. Each successful turn increments it. The call
+        waits for the AI. Retrying with the same `request_id` returns the stored result.
+      operationId: consultationTurn
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TurnRequest' }
+            examples:
+              reply:
+                summary: Answer the AI's question
+                value: { request_id: 3f0a6a3e-9d0b-4b6f-8f5e-2b1f3c4d5e6f, state_version: 2, event: OWNER_REPLY, content: Kami punya dua barista di jam sibuk. }
+              generate:
+                summary: Ask for the solution now
+                value: { request_id: 7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f, state_version: 3, event: GENERATE_NOW }
+      responses:
+        '200':
+          description: The session after the turn.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+        '504': { $ref: '#/components/responses/Timeout' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/owner/consultations/{sessionId}/save:
+    post:
+      tags: [Consultations]
+      summary: Save the final solution and archive the session
+      description: |
+        Requires status `SOLUTION_READY`. Marks `final_solution_message_id` as the final
+        solution, archives the session, and stores the confirmed memories (at most 20; each
+        must cite OWNER messages of this session, usually taken from a message's
+        `memory_candidates`, optionally edited). `state_version` is optional; when sent it is
+        checked like a turn.
+      operationId: saveConsultation
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaveConsultationRequest' }
+      responses:
+        '200':
+          description: The archived session and the memories created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/SaveConsultationResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ---------------------------------------------------------------- Owner: memories
+  /api/v1/owner/shops/{shopId}/memories:
+    get:
+      tags: [Memories]
+      summary: List business memories of a shop
+      operationId: listMemories
+      parameters:
+        - $ref: '#/components/parameters/ShopId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: is_active
+          in: query
+          description: Filter by active flag. Omit to list both.
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Memories.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Memory' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/owner/memories/{memoryId}:
+    patch:
+      tags: [Memories]
+      summary: Edit or (de)activate a business memory
+      description: Send at least one field. Inactive memories are not used in new consultations.
+      operationId: updateMemory
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateMemoryRequest' }
+      responses:
+        '200':
+          description: The updated memory.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Memory' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token from login, register, or refresh.
+
+  parameters:
+    ShopId:
+      name: shopId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IssueId:
+      name: issueId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100000, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    BadRequest:
+      description: |
+        `VALIDATION_ERROR` (field-level `details`, including invalid path UUIDs),
+        `BAD_REQUEST` (malformed JSON, wrong types, empty body), or `INVALID_INPUT`
+        (business rule, e.g. unknown category, `from` after `to`, blank text).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          examples:
+            validation:
+              value:
+                error:
+                  code: VALIDATION_ERROR
+                  message: request validation failed
+                  details:
+                    - { field: email, message: must be a valid email address }
+            malformed:
+              value: { error: { code: BAD_REQUEST, message: request body contains malformed JSON } }
+            invalidInput:
+              value: { error: { code: INVALID_INPUT, message: unknown or unavailable shop category } }
+    Unauthorized:
+      description: '`UNAUTHORIZED` – missing, invalid, or expired access token. Refresh the token and retry once.'
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, example: 'Bearer realm="atlas", error="invalid_token"' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: UNAUTHORIZED, message: invalid or expired access token } }
+    Forbidden:
+      description: '`FORBIDDEN` – the user is a member of the shop but not its Owner.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: FORBIDDEN, message: only the shop owner can do this } }
+    NotFound:
+      description: '`NOT_FOUND` – the resource does not exist or belongs to another shop.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: NOT_FOUND, message: shop not found } }
+    Conflict:
+      description: |
+        `CONFLICT` – the session changed or is busy. Typical messages:
+        `state_version N is stale (current M): reload the session`,
+        `the session is still processing a previous request`, `the session is archived`,
+        `X is not allowed while the session is Y`,
+        `request_id was already used for another request`.
+        Reload with `GET /owner/consultations/{sessionId}` and retry with fresh state.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: CONFLICT, message: 'state_version 2 is stale (current 3): reload the session' } }
+    PayloadTooLarge:
+      description: '`PAYLOAD_TOO_LARGE` – the body exceeds the server limit (`HTTP_MAX_BODY_BYTES`).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    ServiceUnavailable:
+      description: '`SERVICE_UNAVAILABLE` – a dependency (database or AI service) is down. Retry later; consultation retries must reuse the same `request_id`.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: SERVICE_UNAVAILABLE, message: the AI consultation service is not available } }
+    Timeout:
+      description: '`TIMEOUT` – the request timed out. Retry with the same `request_id`, or poll the session.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    InternalError:
+      description: '`INTERNAL_ERROR` – unexpected server error. Details are logged, never returned.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { error: { code: INTERNAL_ERROR, message: internal server error } }
+
+  schemas:
+    # ------------------------------------------------------------ envelopes
+    ErrorCode:
+      type: string
+      enum:
+        - BAD_REQUEST
+        - VALIDATION_ERROR
+        - INVALID_INPUT
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - NOT_FOUND
+        - ROUTE_NOT_FOUND
+        - METHOD_NOT_ALLOWED
+        - CONFLICT
+        - PAYLOAD_TOO_LARGE
+        - INTERNAL_ERROR
+        - SERVICE_UNAVAILABLE
+        - TIMEOUT
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field: { type: string, description: 'Wire name of the field, dotted for nested fields (e.g. `shop.category_id`, `confirmed_memories[0].fact_text`).' }
+        message: { type: string }
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string }
+            details:
+              type: array
+              items: { $ref: '#/components/schemas/FieldError' }
+    PageMeta:
+      type: object
+      required: [page, page_size, total, total_pages]
+      properties:
+        page: { type: integer, example: 1 }
+        page_size: { type: integer, example: 20 }
+        total: { type: integer, format: int64, example: 42 }
+        total_pages: { type: integer, format: int64, example: 3 }
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, example: ok }
+        checks:
+          type: object
+          additionalProperties: { type: string }
+
+    # ------------------------------------------------------------ shops & users
+    Lookup:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Coffee Shop }
+    ShopRole:
+      type: string
+      enum: [Owner, Employee]
+    PublicShop:
+      type: object
+      required: [id, name, description, website, image, category, scale]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        website: { type: string, nullable: true }
+        image: { type: string, nullable: true, description: Image URL. }
+        category: { type: object, allOf: [{ $ref: '#/components/schemas/Lookup' }], nullable: true }
+        scale: { type: object, allOf: [{ $ref: '#/components/schemas/Lookup' }], nullable: true }
+    Shop:
+      allOf:
+        - $ref: '#/components/schemas/PublicShop'
+        - type: object
+          required: [created_at, updated_at]
+          properties:
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    User:
+      type: object
+      required: [id, name, email, phone_number]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        phone_number: { type: string, nullable: true }
+    MyShop:
+      type: object
+      required: [role, shop]
+      properties:
+        role: { $ref: '#/components/schemas/ShopRole' }
+        shop: { $ref: '#/components/schemas/Shop' }
+    ShopDetail:
+      type: object
+      required: [role, shop, owner]
+      properties:
+        role: { $ref: '#/components/schemas/ShopRole' }
+        shop: { $ref: '#/components/schemas/Shop' }
+        owner: { type: object, allOf: [{ $ref: '#/components/schemas/User' }], nullable: true }
+    ShopProfileRequest:
+      type: object
+      required: [name, category_id, scale_id]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 150 }
+        description: { type: string, nullable: true, maxLength: 2000 }
+        website: { type: string, nullable: true, maxLength: 255 }
+        image: { type: string, nullable: true, maxLength: 2048, description: Image URL. }
+        category_id: { type: string, format: uuid, description: From `GET /public/shop-categories`. }
+        scale_id: { type: string, format: uuid, description: From `GET /public/shop-scales`. }
+    UpdateShopRequest:
+      allOf:
+        - $ref: '#/components/schemas/ShopProfileRequest'
+        - type: object
+          properties:
+            owner:
+              type: object
+              description: Optional owner contact update. Omitted fields are unchanged; an empty `phone_number` clears it.
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+                phone_number: { type: string, maxLength: 30 }
+
+    # ------------------------------------------------------------ auth
+    RegisterRequest:
+      type: object
+      required: [name, email, password, shop]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100, example: Siti Rahma }
+        email: { type: string, format: email, maxLength: 254, example: siti@example.com }
+        phone_number: { type: string, nullable: true, maxLength: 30, example: '+6281234567890' }
+        password: { type: string, format: password, minLength: 8, maxLength: 72, description: 'At most 72 bytes (bcrypt limit).' }
+        shop: { $ref: '#/components/schemas/ShopProfileRequest' }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, format: password, maxLength: 72 }
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string, maxLength: 4096 }
+    AuthResponse:
+      type: object
+      required: [token_type, access_token, access_token_expires_at, refresh_token, refresh_token_expires_at, user]
+      properties:
+        token_type: { type: string, enum: [Bearer] }
+        access_token: { type: string }
+        access_token_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_token_expires_at: { type: string, format: date-time }
+        user: { $ref: '#/components/schemas/User' }
+        shop:
+          allOf: [{ $ref: '#/components/schemas/Shop' }]
+          description: Only present in the register response.
+
+    # ------------------------------------------------------------ feedback
+    SubmitFeedbackRequest:
+      type: object
+      required: [rating, feedback]
+      properties:
+        name: { type: string, nullable: true, maxLength: 100, description: Customer name; omit for anonymous. }
+        rating: { type: number, format: double, minimum: 1, maximum: 5, description: 'One decimal place, e.g. 4.5.' }
+        feedback: { type: string, minLength: 1, maxLength: 5000 }
+        image: { type: string, nullable: true, maxLength: 2048, description: Image URL. }
+    FeedbackCreated:
+      type: object
+      required: [feedback_id, shop_id, rating, created_at]
+      properties:
+        feedback_id: { type: string, format: uuid }
+        shop_id: { type: string, format: uuid }
+        rating: { type: number, format: double }
+        created_at: { type: string, format: date-time }
+    Feedback:
+      type: object
+      required: [id, name, rating, feedback, image, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, nullable: true }
+        rating: { type: number, format: double }
+        feedback: { type: string }
+        image: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    # ------------------------------------------------------------ insights
+    Sentiment:
+      type: string
+      enum: [Negative, Positive, Neutral]
+    Severity:
+      type: string
+      enum: [Severe]
+      description: Only severe opinions are flagged; otherwise `null`.
+    PlanetStatus:
+      type: string
+      enum: [UNCONSULTED, CONSULTED, HAS_NEW_REVIEWS]
+      description: |
+        `UNCONSULTED`: no archived consultation yet. `CONSULTED`: archived consultation and
+        no new opinions since. `HAS_NEW_REVIEWS`: new opinions arrived after the last
+        archived consultation.
+    SentimentBreakdown:
+      type: object
+      required: [negative, positive, neutral]
+      properties:
+        negative: { type: integer, format: int64 }
+        positive: { type: integer, format: int64 }
+        neutral: { type: integer, format: int64 }
+    SeverityBreakdown:
+      type: object
+      required: [severe, not_severe]
+      properties:
+        severe: { type: integer, format: int64 }
+        not_severe: { type: integer, format: int64 }
+    IssueStats:
+      type: object
+      description: One feedback can yield several opinions, so feedbacks and opinions are counted separately.
+      required: [unique_feedback_count, opinion_count, average_rating, first_feedback_at, last_feedback_at, sentiment, severity]
+      properties:
+        unique_feedback_count: { type: integer, format: int64 }
+        opinion_count: { type: integer, format: int64 }
+        average_rating: { type: number, format: double }
+        first_feedback_at: { type: string, format: date-time, nullable: true }
+        last_feedback_at: { type: string, format: date-time, nullable: true }
+        sentiment: { $ref: '#/components/schemas/SentimentBreakdown' }
+        severity: { $ref: '#/components/schemas/SeverityBreakdown' }
+    IssueSummary:
+      type: object
+      required: [id, title, stats, planet_status, last_consulted_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string, example: Antrean lama di jam sibuk }
+        stats: { $ref: '#/components/schemas/IssueStats' }
+        planet_status: { $ref: '#/components/schemas/PlanetStatus' }
+        last_consulted_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Evidence:
+      type: object
+      required: [opinion_id, opinion_text, evidence_text, sentiment, severity, feedback_id, feedback, rating, created_at]
+      properties:
+        opinion_id: { type: string, format: uuid }
+        opinion_text: { type: string }
+        evidence_text: { type: string, nullable: true, description: Excerpt of the feedback supporting the opinion. }
+        sentiment: { $ref: '#/components/schemas/Sentiment' }
+        severity: { type: string, allOf: [{ $ref: '#/components/schemas/Severity' }], nullable: true }
+        feedback_id: { type: string, format: uuid }
+        feedback: { type: string, description: Full feedback text. }
+        rating: { type: number, format: double }
+        created_at: { type: string, format: date-time }
+    SessionStatus:
+      type: string
+      enum: [COLLECTING_CONTEXT, SOLUTION_READY, ARCHIVED]
+    SessionSummary:
+      type: object
+      required: [id, status, state_version, question_count, started_by_user_id, final_solution_message_id, created_at, updated_at, archived_at]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        state_version: { type: integer, format: int64 }
+        question_count: { type: integer }
+        started_by_user_id: { type: string, format: uuid }
+        final_solution_message_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        archived_at: { type: string, format: date-time, nullable: true }
+    IssueDetail:
+      type: object
+      required: [shop_id, issue, evidence, consultations]
+      properties:
+        shop_id: { type: string, format: uuid }
+        issue: { $ref: '#/components/schemas/IssueSummary' }
+        evidence:
+          type: array
+          items: { $ref: '#/components/schemas/Evidence' }
+        consultations:
+          type: array
+          items: { $ref: '#/components/schemas/SessionSummary' }
+    Dashboard:
+      type: object
+      required: [range, kpi, sentiment_trend, weekly_reviews, top_complaints, recent_feedbacks]
+      properties:
+        range:
+          type: object
+          required: [from, to, time_zone]
+          properties:
+            from: { type: string, format: date }
+            to: { type: string, format: date, description: Inclusive. }
+            time_zone: { type: string, example: Asia/Jakarta }
+        kpi:
+          type: object
+          required: [total_feedbacks, average_rating, total_opinions, sentiment, severe_opinions, active_issues]
+          properties:
+            total_feedbacks: { type: integer, format: int64 }
+            average_rating: { type: number, format: double }
+            total_opinions: { type: integer, format: int64 }
+            sentiment: { $ref: '#/components/schemas/SentimentBreakdown' }
+            severe_opinions: { type: integer, format: int64 }
+            active_issues: { type: integer, format: int64 }
+        sentiment_trend:
+          type: array
+          description: One point per day of the range.
+          items:
+            allOf:
+              - type: object
+                required: [date]
+                properties:
+                  date: { type: string, format: date }
+              - $ref: '#/components/schemas/SentimentBreakdown'
+        weekly_reviews:
+          type: array
+          description: Weeks start on Monday.
+          items:
+            type: object
+            required: [week_start, feedback_count, average_rating]
+            properties:
+              week_start: { type: string, format: date }
+              feedback_count: { type: integer, format: int64 }
+              average_rating: { type: number, format: double }
+        top_complaints:
+          type: array
+          description: Up to 5 issues ranked by negative opinions in the range.
+          items:
+            type: object
+            required: [issue_id, title, negative_opinions, unique_feedbacks, severe_opinions]
+            properties:
+              issue_id: { type: string, format: uuid }
+              title: { type: string }
+              negative_opinions: { type: integer, format: int64 }
+              unique_feedbacks: { type: integer, format: int64 }
+              severe_opinions: { type: integer, format: int64 }
+        recent_feedbacks:
+          type: array
+          description: The 10 most recent feedbacks (not limited by the range).
+          items: { $ref: '#/components/schemas/Feedback' }
+
+    # ------------------------------------------------------------ consultations
+    StartConsultationRequest:
+      type: object
+      required: [request_id]
+      properties:
+        request_id: { type: string, format: uuid, description: Client-generated idempotency key. }
+    TurnEvent:
+      type: string
+      enum: [OWNER_REPLY, SKIP_QUESTION, GENERATE_NOW, CONTINUE_DISCUSSION]
+    TurnRequest:
+      type: object
+      required: [request_id, state_version, event]
+      properties:
+        request_id: { type: string, format: uuid, description: Client-generated idempotency key. }
+        state_version: { type: integer, format: int64, minimum: 1, description: The session's current `state_version`. }
+        event: { $ref: '#/components/schemas/TurnEvent' }
+        content: { type: string, maxLength: 4000, description: Required for `OWNER_REPLY` and `CONTINUE_DISCUSSION`; ignored otherwise. }
+    SaveConsultationRequest:
+      type: object
+      required: [final_solution_message_id]
+      properties:
+        final_solution_message_id: { type: string, format: uuid, description: A `SOLUTION` message of this session. }
+        state_version: { type: integer, format: int64, minimum: 1, nullable: true }
+        confirmed_memories:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            required: [fact_text, source_owner_message_ids]
+            properties:
+              fact_text: { type: string, minLength: 1, maxLength: 1000 }
+              source_owner_message_ids:
+                type: array
+                minItems: 1
+                maxItems: 50
+                items: { type: string, format: uuid }
+    MessageRole:
+      type: string
+      enum: [OWNER, ATLAS_AI]
+    MessageType:
+      type: string
+      enum: [TEXT, SOLUTION]
+    MemoryCandidate:
+      type: object
+      required: [fact_text, source_owner_message_ids]
+      properties:
+        fact_text: { type: string }
+        source_owner_message_ids:
+          type: array
+          items: { type: string, format: uuid }
+    Message:
+      type: object
+      description: |
+        `TEXT` messages carry `content` (owner text or AI question; AI questions also carry
+        `topic_key`). `SOLUTION` messages carry `solution` and `revision` (1, 2, ... per
+        session). Owner messages are stored only for `OWNER_REPLY` and
+        `CONTINUE_DISCUSSION`.
+      required: [id, role, message_type, content, solution, revision, topic_key, model_id, prompt_version, memory_candidates, request_id, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        role: { $ref: '#/components/schemas/MessageRole' }
+        message_type: { $ref: '#/components/schemas/MessageType' }
+        content: { type: string, nullable: true }
+        solution: { type: object, allOf: [{ $ref: '#/components/schemas/Solution' }], nullable: true }
+        revision: { type: integer, nullable: true }
+        topic_key: { type: string, nullable: true }
+        model_id: { type: string, nullable: true }
+        prompt_version: { type: string, nullable: true }
+        memory_candidates:
+          type: array
+          description: Business facts proposed by the AI for the owner to confirm on save.
+          items: { $ref: '#/components/schemas/MemoryCandidate' }
+        request_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+    Session:
+      type: object
+      required: [id, shop_id, issue_id, started_by_user_id, status, state_version, question_count, asked_topics, skipped_topics, is_processing, final_solution_message_id, context_snapshot, messages, replayed, created_at, updated_at, archived_at]
+      properties:
+        id: { type: string, format: uuid }
+        shop_id: { type: string, format: uuid }
+        issue_id: { type: string, format: uuid }
+        started_by_user_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        state_version: { type: integer, format: int64, description: Send it back with the next turn. }
+        question_count: { type: integer }
+        asked_topics:
+          type: array
+          items: { type: string }
+        skipped_topics:
+          type: array
+          items: { type: string }
+        is_processing: { type: boolean, description: 'A turn is running; turns answer 409 until it finishes. Poll this endpoint.' }
+        final_solution_message_id: { type: string, format: uuid, nullable: true }
+        context_snapshot: { $ref: '#/components/schemas/ContextSnapshot' }
+        messages:
+          type: array
+          description: Oldest first.
+          items: { $ref: '#/components/schemas/Message' }
+        replayed: { type: boolean, description: True when the response replays an already processed `request_id`. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        archived_at: { type: string, format: date-time, nullable: true }
+    SaveConsultationResponse:
+      type: object
+      required: [session, memories]
+      properties:
+        session: { $ref: '#/components/schemas/Session' }
+        memories:
+          type: array
+          items: { $ref: '#/components/schemas/Memory' }
+
+    # ------------------------------------------------------------ solution (AI output)
+    References:
+      type: object
+      description: IDs a statement is grounded on. Every ID exists in the session's context snapshot or messages.
+      required: [opinion_ids, owner_message_ids, memory_ids]
+      properties:
+        opinion_ids:
+          type: array
+          items: { type: string, format: uuid }
+        owner_message_ids:
+          type: array
+          items: { type: string, format: uuid }
+        memory_ids:
+          type: array
+          items: { type: string, format: uuid }
+    Solution:
+      type: object
+      description: The five-component structured solution. Every list has at least one item.
+      required: [findings, customer_evidence, hypotheses, recommendations, success_indicators]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [statement, references]
+            properties:
+              statement: { type: string }
+              references: { $ref: '#/components/schemas/References' }
+        customer_evidence:
+          type: array
+          items:
+            type: object
+            required: [opinion_id, quote, note]
+            properties:
+              opinion_id: { type: string, format: uuid }
+              quote: { type: string }
+              note: { type: string }
+        hypotheses:
+          type: array
+          items:
+            type: object
+            required: [statement, confidence, references]
+            properties:
+              statement: { type: string }
+              confidence: { type: string, description: Free-form label from the AI., example: high }
+              references: { $ref: '#/components/schemas/References' }
+        recommendations:
+          type: array
+          items:
+            type: object
+            required: [title, description, priority, references]
+            properties:
+              title: { type: string }
+              description: { type: string }
+              priority: { type: string, description: Free-form label from the AI., example: high }
+              references: { $ref: '#/components/schemas/References' }
+        success_indicators:
+          type: array
+          items:
+            type: object
+            required: [metric, target, timeframe]
+            properties:
+              metric: { type: string }
+              target: { type: string }
+              timeframe: { type: string }
+    ContextSnapshot:
+      type: object
+      description: Evidence captured when the session started. Fixed for the session's lifetime.
+      required: [issue, period, stats, evidence, shop, memories, prior_issue_solution, captured_at]
+      properties:
+        issue:
+          type: object
+          required: [id, title]
+          properties:
+            id: { type: string, format: uuid }
+            title: { type: string }
+        period:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time, nullable: true }
+            to: { type: string, format: date-time, nullable: true }
+        stats: { $ref: '#/components/schemas/IssueStats' }
+        evidence:
+          type: array
+          items:
+            type: object
+            description: Same as `Evidence`, but the full text is in `full_feedback`.
+            required: [opinion_id, opinion_text, evidence_text, sentiment, severity, feedback_id, full_feedback, rating, created_at]
+            properties:
+              opinion_id: { type: string, format: uuid }
+              opinion_text: { type: string }
+              evidence_text: { type: string, nullable: true }
+              sentiment: { $ref: '#/components/schemas/Sentiment' }
+              severity: { type: string, allOf: [{ $ref: '#/components/schemas/Severity' }], nullable: true }
+              feedback_id: { type: string, format: uuid }
+              full_feedback: { type: string }
+              rating: { type: number, format: double }
+              created_at: { type: string, format: date-time }
+        shop:
+          type: object
+          required: [id, name, description, category, scale]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            description: { type: string }
+            category: { type: string }
+            scale: { type: string }
+        memories:
+          type: array
+          items:
+            type: object
+            required: [id, fact_text]
+            properties:
+              id: { type: string, format: uuid }
+              fact_text: { type: string }
+        prior_issue_solution:
+          type: object
+          nullable: true
+          description: Final solution of the latest archived session on the same issue.
+          required: [session_id, message_id, archived_at, solution]
+          properties:
+            session_id: { type: string, format: uuid }
+            message_id: { type: string, format: uuid }
+            archived_at: { type: string, format: date-time }
+            solution: { $ref: '#/components/schemas/Solution' }
+        captured_at: { type: string, format: date-time }
+
+    # ------------------------------------------------------------ memories
+    Memory:
+      type: object
+      required: [id, shop_id, fact_text, source_session_id, source_owner_message_ids, confirmed_by_user_id, confirmed_at, is_active, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        shop_id: { type: string, format: uuid }
+        fact_text: { type: string }
+        source_session_id: { type: string, format: uuid }
+        source_owner_message_ids:
+          type: array
+          items: { type: string, format: uuid }
+        confirmed_by_user_id: { type: string, format: uuid }
+        confirmed_at: { type: string, format: date-time }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UpdateMemoryRequest:
+      type: object
+      minProperties: 1
+      properties:
+        fact_text: { type: string, minLength: 1, maxLength: 1000 }
+        is_active: { type: boolean }
