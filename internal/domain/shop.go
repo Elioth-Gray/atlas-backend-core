@@ -15,10 +15,12 @@ const (
 	ShopRoleEmployee ShopRole = "Employee"
 )
 
-// ShopCategory is a business category (master data).
+// ShopCategory is a business category (master data). Only enabled categories are offered
+// on forms and accepted for new or updated shops.
 type ShopCategory struct {
 	ID        uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
 	Category  string    `gorm:"not null"`
+	IsEnabled bool      `gorm:"not null;default:true"`
 	CreatedAt time.Time `gorm:"not null"`
 	UpdatedAt time.Time `gorm:"not null"`
 	IsDeleted bool      `gorm:"not null;default:false"`

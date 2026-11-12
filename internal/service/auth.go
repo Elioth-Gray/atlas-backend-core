@@ -216,6 +216,7 @@ func (s *AuthService) issue(ctx context.Context, userID uuid.UUID, expected *str
 
 // masterDataChecker verifies category and scale IDs.
 type masterDataChecker interface {
+	// CategoryExists also rejects disabled categories (only Bakery is enabled for now).
 	CategoryExists(ctx context.Context, id uuid.UUID) (bool, error)
 	ScaleExists(ctx context.Context, id uuid.UUID) (bool, error)
 }
@@ -231,7 +232,7 @@ func normalizeShopInput(ctx context.Context, master masterDataChecker, in ShopIn
 		return ShopInput{}, err
 	}
 	if !ok {
-		return ShopInput{}, apperror.InvalidInput("unknown shop category")
+		return ShopInput{}, apperror.InvalidInput("unknown or unavailable shop category")
 	}
 	ok, err = master.ScaleExists(ctx, in.ScaleID)
 	if err != nil {

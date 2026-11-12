@@ -25,10 +25,10 @@ func NewShopRepository(db *gorm.DB) *ShopRepository {
 	return &ShopRepository{db: db}
 }
 
-// ListCategories returns every active shop category, alphabetically.
+// ListCategories returns every active, enabled shop category, alphabetically.
 func (r *ShopRepository) ListCategories(ctx context.Context) ([]domain.ShopCategory, error) {
 	var out []domain.ShopCategory
-	if err := database.Conn(ctx, r.db).Where("is_deleted = false").Order("category").Find(&out).Error; err != nil {
+	if err := database.Conn(ctx, r.db).Where("is_deleted = false AND is_enabled = true").Order("category").Find(&out).Error; err != nil {
 		return nil, fmt.Errorf("list shop categories: %w", err)
 	}
 	return out, nil
@@ -43,10 +43,11 @@ func (r *ShopRepository) ListScales(ctx context.Context) ([]domain.ShopScale, er
 	return out, nil
 }
 
-// CategoryExists reports whether an active category with the given ID exists.
+// CategoryExists reports whether an active, enabled category with the given ID exists.
 func (r *ShopRepository) CategoryExists(ctx context.Context, id uuid.UUID) (bool, error) {
 	var n int64
-	err := database.Conn(ctx, r.db).Model(&domain.ShopCategory{}).Where("id = ? AND is_deleted = false", id).Count(&n).Error
+	err := database.Conn(ctx, r.db).Model(&domain.ShopCategory{}).
+		Where("id = ? AND is_deleted = false AND is_enabled = true", id).Count(&n).Error
 	if err != nil {
 		return false, fmt.Errorf("check shop category: %w", err)
 	}
