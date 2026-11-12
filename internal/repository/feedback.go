@@ -118,9 +118,23 @@ func (r *FeedbackRepository) ClaimJob(ctx context.Context, now time.Time, lease 
 	return claimed, nil
 }
 
+// maxCandidateIssues caps the active issues sent to the AI for clustering.
+const maxCandidateIssues = 200
+
 // CompleteJob marks a job DONE.
 func (r *FeedbackRepository) CompleteJob(ctx context.Context, id uuid.UUID) error {
 	return r.updateJob(ctx, id, map[string]any{"status": domain.JobDone, "locked_until": nil, "last_error": nil})
+}
+
+// ReleaseJob puts an interrupted job back to PENDING immediately without counting the
+// aborted run as a failed attempt.
+func (r *FeedbackRepository) ReleaseJob(ctx context.Context, id uuid.UUID, now time.Time) error {
+	return r.updateJob(ctx, id, map[string]any{
+		"status":       domain.JobPending,
+		"attempts":     gorm.Expr("GREATEST(attempts - 1, 0)"),
+		"next_run_at":  now,
+		"locked_until": nil,
+	})
 }
 
 // RetryJob puts a job back to PENDING, due at nextRunAt.
@@ -163,7 +177,8 @@ func (r *FeedbackRepository) ListCandidateIssues(ctx context.Context, shopID uui
 		Joins("JOIN issues i ON i.id = fo.issue_id AND i.is_deleted = false").
 		Select("i.id AS id, i.title AS title, COUNT(fo.id) AS opinion_count").
 		Group("i.id, i.title").
-		Order("opinion_count DESC").
+		Order("opinion_count DESC, i.id").
+		Limit(maxCandidateIssues).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("list candidate issues: %w", err)
@@ -180,7 +195,7 @@ func (r *FeedbackRepository) ListCandidateVectors(ctx context.Context, shopID uu
 	err := shopOpinions(database.Conn(ctx, r.db), shopID).
 		Joins("JOIN opinion_vectors ov ON ov.feedback_opinion_id = fo.id AND ov.is_deleted = false").
 		Select("fo.id AS opinion_id, fo.issue_id AS issue_id, ov.embedding AS embedding, ov.embedding_model AS embedding_model").
-		Order("ov.created_at DESC").
+		Order("f.created_at DESC, fo.id DESC").
 		Limit(limit).
 		Scan(&rows).Error
 	if err != nil {
@@ -199,9 +214,17 @@ func (r *FeedbackRepository) CreateIssue(ctx context.Context, issue domain.Issue
 
 // TouchIssue bumps an issue's updated_at when new opinions join it.
 func (r *FeedbackRepository) TouchIssue(ctx context.Context, id uuid.UUID) error {
-	err := database.Conn(ctx, r.db).Model(&domain.Issue{}).Where("id = ?", id).Update("updated_at", time.Now().UTC()).Error
+	return r.TouchIssues(ctx, []uuid.UUID{id})
+}
+
+// TouchIssues bumps updated_at on the given issues in a single query.
+func (r *FeedbackRepository) TouchIssues(ctx context.Context, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	err := database.Conn(ctx, r.db).Model(&domain.Issue{}).Where("id IN ?", ids).Update("updated_at", time.Now().UTC()).Error
 	if err != nil {
-		return fmt.Errorf("touch issue: %w", err)
+		return fmt.Errorf("touch issues: %w", err)
 	}
 	return nil
 }

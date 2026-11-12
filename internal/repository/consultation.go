@@ -61,12 +61,17 @@ func (r *ConsultationRepository) GetSession(ctx context.Context, id uuid.UUID) (
 	return s, nil
 }
 
-// ListSessionsByIssue returns the sessions of an issue within a shop, newest first.
+// ListSessionsByIssue returns the non-empty sessions of an issue within a shop, newest first.
 func (r *ConsultationRepository) ListSessionsByIssue(ctx context.Context, shopID, issueID uuid.UUID) ([]domain.ConsultationSession, error) {
 	var out []domain.ConsultationSession
-	err := database.Conn(ctx, r.db).
+	db := database.Conn(ctx, r.db)
+	hasMessages := db.Model(&domain.ConsultationMessage{}).
+		Select("1").
+		Where("consultation_messages.session_id = consultation_sessions.id").
+		Limit(1)
+	err := db.
 		Omit("context_snapshot").
-		Where("shop_id = ? AND issue_id = ?", shopID, issueID).
+		Where("shop_id = ? AND issue_id = ? AND EXISTS (?)", shopID, issueID, hasMessages).
 		Order("created_at DESC, id DESC").
 		Find(&out).Error
 	if err != nil {

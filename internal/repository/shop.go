@@ -43,6 +43,36 @@ func (r *ShopRepository) ListScales(ctx context.Context) ([]domain.ShopScale, er
 	return out, nil
 }
 
+// GetCategory returns an active, enabled shop category by ID.
+func (r *ShopRepository) GetCategory(ctx context.Context, id uuid.UUID) (domain.ShopCategory, error) {
+	var c domain.ShopCategory
+	err := database.Conn(ctx, r.db).
+		Where("id = ? AND is_deleted = false AND is_enabled = true", id).
+		First(&c).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.ShopCategory{}, apperror.NotFound("shop category not found")
+	}
+	if err != nil {
+		return domain.ShopCategory{}, fmt.Errorf("select shop category: %w", err)
+	}
+	return c, nil
+}
+
+// GetScale returns an active shop scale by ID.
+func (r *ShopRepository) GetScale(ctx context.Context, id uuid.UUID) (domain.ShopScale, error) {
+	var s domain.ShopScale
+	err := database.Conn(ctx, r.db).
+		Where("id = ? AND is_deleted = false", id).
+		First(&s).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.ShopScale{}, apperror.NotFound("shop scale not found")
+	}
+	if err != nil {
+		return domain.ShopScale{}, fmt.Errorf("select shop scale: %w", err)
+	}
+	return s, nil
+}
+
 // CategoryExists reports whether an active, enabled category with the given ID exists.
 func (r *ShopRepository) CategoryExists(ctx context.Context, id uuid.UUID) (bool, error) {
 	var n int64
@@ -86,13 +116,13 @@ func (r *ShopRepository) AddMember(ctx context.Context, m domain.ShopUser) error
 	return nil
 }
 
-// GetActive returns an active shop with its category and scale.
+// GetActive returns an active shop with its category and scale in a single query.
 func (r *ShopRepository) GetActive(ctx context.Context, id uuid.UUID) (domain.Shop, error) {
 	var shop domain.Shop
 	err := database.Conn(ctx, r.db).
-		Preload("Category").
-		Preload("Scale").
-		Where("id = ? AND is_deleted = false", id).
+		Joins("Category").
+		Joins("Scale").
+		Where("shops.id = ? AND shops.is_deleted = false", id).
 		First(&shop).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Shop{}, apperror.NotFound("shop not found")

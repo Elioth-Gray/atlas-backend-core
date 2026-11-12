@@ -50,8 +50,12 @@ func (s *UserService) Create(ctx context.Context, in CreateUserInput) (domain.Us
 	if err != nil {
 		return domain.User{}, err
 	}
+	email, err := validateEmail(in.Email)
+	if err != nil {
+		return domain.User{}, err
+	}
 
-	user, err := s.repo.Create(ctx, domain.User{Name: name, Email: normalizeEmail(in.Email)})
+	user, err := s.repo.Create(ctx, domain.User{Name: name, Email: email})
 	if err != nil {
 		return domain.User{}, fmt.Errorf("create user: %w", err)
 	}
@@ -93,7 +97,10 @@ func (s *UserService) Update(ctx context.Context, id uuid.UUID, in UpdateUserInp
 		changes.Name = &name
 	}
 	if in.Email != nil {
-		email := normalizeEmail(*in.Email)
+		email, err := validateEmail(*in.Email)
+		if err != nil {
+			return domain.User{}, err
+		}
 		changes.Email = &email
 	}
 
@@ -122,4 +129,12 @@ func normalizeName(name string) (string, error) {
 
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func validateEmail(email string) (string, error) {
+	email = normalizeEmail(email)
+	if email == "" || !strings.Contains(email, "@") {
+		return "", apperror.InvalidInput("email must be a valid email address")
+	}
+	return email, nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"atlas-backend-core/internal/apperror"
 	"atlas-backend-core/internal/domain"
@@ -98,7 +99,7 @@ func (s *ShopService) UpdateMine(ctx context.Context, userID, shopID uuid.UUID, 
 	if err := requireOwner(ctx, s.shops, userID, shopID); err != nil {
 		return ShopDetail{}, err
 	}
-	shopIn, err := normalizeShopInput(ctx, s.shops, in.Shop)
+	shopIn, _, _, err := normalizeShopInput(ctx, s.shops, in.Shop)
 	if err != nil {
 		return ShopDetail{}, err
 	}
@@ -143,13 +144,44 @@ func (s *ShopService) UpdateMine(ctx context.Context, userID, shopID uuid.UUID, 
 }
 
 func (s *ShopService) detail(ctx context.Context, shopID uuid.UUID, role domain.ShopRole) (ShopDetail, error) {
-	shop, err := s.shops.GetActive(ctx, shopID)
-	if err != nil {
-		return ShopDetail{}, fmt.Errorf("get shop: %w", err)
-	}
-	owner, err := s.shops.GetOwner(ctx, shopID)
-	if err != nil && !errors.Is(err, apperror.ErrNotFound) {
-		return ShopDetail{}, fmt.Errorf("get shop owner: %w", err)
+	var (
+		shop  domain.Shop
+		owner domain.User
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		var err error
+		shop, err = s.shops.GetActive(gctx, shopID)
+		if err != nil {
+			return fmt.Errorf("get shop: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		var err error
+		owner, err = s.shops.GetOwner(gctx, shopID)
+		if err != nil && !errors.Is(err, apperror.ErrNotFound) {
+			return fmt.Errorf("get shop owner: %w", err)
+		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		return ShopDetail{}, err
 	}
 	return ShopDetail{Shop: shop, Role: role, Owner: owner}, nil
+}
+
+// shopProfile maps a shop (with category and scale loaded) to its AI profile.
+func shopProfile(s domain.Shop) domain.ShopProfile {
+	p := domain.ShopProfile{ID: s.ID, Name: s.Name}
+	if s.Description != nil {
+		p.Description = *s.Description
+	}
+	if s.Category != nil {
+		p.Category = s.Category.Category
+	}
+	if s.Scale != nil {
+		p.Scale = s.Scale.Scale
+	}
+	return p
 }

@@ -27,6 +27,7 @@ const maxErrorLength = 1000
 type JobQueue interface {
 	ClaimJob(ctx context.Context, now time.Time, lease time.Duration) (*domain.FeedbackJob, error)
 	CompleteJob(ctx context.Context, id uuid.UUID) error
+	ReleaseJob(ctx context.Context, id uuid.UUID, now time.Time) error
 	RetryJob(ctx context.Context, id uuid.UUID, nextRunAt time.Time, lastErr string) error
 	FailJob(ctx context.Context, id uuid.UUID, lastErr string) error
 }
@@ -136,6 +137,12 @@ func (w *FeedbackWorker) handle(ctx context.Context, job domain.FeedbackJob) {
 			return
 		}
 		log.Info("feedback processed", slog.Duration("duration", time.Since(started)))
+	case ctx.Err() != nil && errors.Is(procErr, context.Canceled):
+		if err := w.queue.ReleaseJob(saveCtx, job.ID, w.now()); err != nil {
+			log.Error("release feedback job", slog.String("error", err.Error()))
+			return
+		}
+		log.Info("feedback job released on shutdown")
 	case job.Attempts >= w.cfg.MaxAttempts:
 		if err := w.queue.FailJob(saveCtx, job.ID, truncate(procErr.Error())); err != nil {
 			log.Error("fail feedback job", slog.String("error", err.Error()))
@@ -146,11 +153,7 @@ func (w *FeedbackWorker) handle(ctx context.Context, job domain.FeedbackJob) {
 		if err := w.queue.RetryJob(saveCtx, job.ID, next, truncate(procErr.Error())); err != nil {
 			log.Error("reschedule feedback job", slog.String("error", err.Error()))
 		}
-		level := slog.LevelWarn
-		if errors.Is(procErr, context.Canceled) {
-			level = slog.LevelInfo
-		}
-		log.Log(ctx, level, "feedback job will be retried", slog.Time("next_run_at", next), slog.String("error", procErr.Error()))
+		log.Warn("feedback job will be retried", slog.Time("next_run_at", next), slog.String("error", procErr.Error()))
 	}
 }
 

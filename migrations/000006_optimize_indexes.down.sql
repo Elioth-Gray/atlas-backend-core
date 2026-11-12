@@ -1,0 +1,4 @@
+DROP INDEX IF EXISTS idx_feedback_opinions_active_lookup;
+DROP INDEX IF EXISTS idx_consultation_messages_ai_req_lookup;
+DROP INDEX IF EXISTS idx_consultation_sessions_processing_req;
+DROP INDEX IF EXISTS idx_consultation_sessions_shop_issue_archived;
