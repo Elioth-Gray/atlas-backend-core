@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pgvector/pgvector-go"
+	"golang.org/x/sync/errgroup"
 
 	"atlas-backend-core/internal/apperror"
 	"atlas-backend-core/internal/domain"
@@ -108,7 +109,7 @@ type FeedbackProcessingRepository interface {
 	ListCandidateIssues(ctx context.Context, shopID uuid.UUID) ([]domain.CandidateIssue, error)
 	ListCandidateVectors(ctx context.Context, shopID uuid.UUID, limit int) ([]domain.CandidateVector, error)
 	CreateIssue(ctx context.Context, issue domain.Issue) (domain.Issue, error)
-	TouchIssue(ctx context.Context, id uuid.UUID) error
+	TouchIssues(ctx context.Context, ids []uuid.UUID) error
 	CreateOpinion(ctx context.Context, op domain.FeedbackOpinion, vec domain.OpinionVector) error
 }
 
@@ -150,21 +151,29 @@ func (p *FeedbackProcessor) Process(ctx context.Context, feedbackID uuid.UUID) e
 	if err != nil || done {
 		return err
 	}
-	shop, err := p.shops.GetActive(ctx, fb.ShopID)
-	if errors.Is(err, apperror.ErrNotFound) {
-		log.WarnContext(ctx, "shop no longer active, skipping feedback", slog.String("feedback_id", feedbackID.String()))
-		return nil
-	}
-	if err != nil {
+	var (
+		shop       domain.Shop
+		candidates []domain.CandidateIssue
+		vectors    []domain.CandidateVector
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() (err error) {
+		shop, err = p.shops.GetActive(gctx, fb.ShopID)
 		return err
-	}
-
-	candidates, err := p.repo.ListCandidateIssues(ctx, shop.ID)
-	if err != nil {
+	})
+	g.Go(func() (err error) {
+		candidates, err = p.repo.ListCandidateIssues(gctx, fb.ShopID)
 		return err
-	}
-	vectors, err := p.repo.ListCandidateVectors(ctx, shop.ID, p.candidateLimit)
-	if err != nil {
+	})
+	g.Go(func() (err error) {
+		vectors, err = p.repo.ListCandidateVectors(gctx, fb.ShopID, p.candidateLimit)
+		return err
+	})
+	if err := g.Wait(); err != nil {
+		if errors.Is(err, apperror.ErrNotFound) {
+			log.WarnContext(ctx, "shop no longer active, skipping feedback", slog.String("feedback_id", feedbackID.String()))
+			return nil
+		}
 		return err
 	}
 	analysis, err := p.ai.ProcessFeedback(ctx, FeedbackAnalysisRequest{
@@ -226,8 +235,12 @@ func (p *FeedbackProcessor) store(ctx context.Context, fb domain.Feedback, opini
 			return err
 		}
 	}
-	for id := range touched {
-		if err := p.repo.TouchIssue(ctx, id); err != nil {
+	if len(touched) > 0 {
+		ids := make([]uuid.UUID, 0, len(touched))
+		for id := range touched {
+			ids = append(ids, id)
+		}
+		if err := p.repo.TouchIssues(ctx, ids); err != nil {
 			return err
 		}
 	}
@@ -286,19 +299,4 @@ func validOpinions(ctx context.Context, in []ExtractedOpinion) []ExtractedOpinio
 		logger.FromContext(ctx).WarnContext(ctx, "dropping invalid opinion from AI response", slog.Int("index", i))
 	}
 	return out
-}
-
-// shopProfile maps a shop (with category and scale loaded) to its AI profile.
-func shopProfile(s domain.Shop) domain.ShopProfile {
-	p := domain.ShopProfile{ID: s.ID, Name: s.Name}
-	if s.Description != nil {
-		p.Description = *s.Description
-	}
-	if s.Category != nil {
-		p.Category = s.Category.Category
-	}
-	if s.Scale != nil {
-		p.Scale = s.Scale.Scale
-	}
-	return p
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"atlas-backend-core/internal/apperror"
 	"atlas-backend-core/internal/domain"
@@ -83,27 +84,46 @@ func (s *InsightService) Dashboard(ctx context.Context, userID, shopID uuid.UUID
 		return domain.Dashboard{}, err
 	}
 
-	d := domain.Dashboard{Range: rg}
-	if d.KPI, err = s.repo.DashboardKPI(ctx, shopID, rg); err != nil {
+	var (
+		kpi       domain.DashboardKPI
+		trend     []domain.SentimentTrendPoint
+		weekly    []domain.WeeklyReviewBucket
+		top       []domain.TopComplaint
+		feedbacks []domain.Feedback
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() (err error) {
+		kpi, err = s.repo.DashboardKPI(gctx, shopID, rg)
+		return err
+	})
+	g.Go(func() (err error) {
+		trend, err = s.repo.SentimentTrend(gctx, shopID, rg)
+		return err
+	})
+	g.Go(func() (err error) {
+		weekly, err = s.repo.WeeklyReviews(gctx, shopID, rg)
+		return err
+	})
+	g.Go(func() (err error) {
+		top, err = s.repo.TopComplaints(gctx, shopID, rg, topComplaintsLimit)
+		return err
+	})
+	g.Go(func() (err error) {
+		feedbacks, err = s.repo.RecentFeedbacks(gctx, shopID, recentFeedbacksLimit)
+		return err
+	})
+	if err := g.Wait(); err != nil {
 		return domain.Dashboard{}, err
 	}
-	trend, err := s.repo.SentimentTrend(ctx, shopID, rg)
-	if err != nil {
-		return domain.Dashboard{}, err
-	}
-	d.SentimentTrend = fillDays(trend, rg, loc)
-	weekly, err := s.repo.WeeklyReviews(ctx, shopID, rg)
-	if err != nil {
-		return domain.Dashboard{}, err
-	}
-	d.WeeklyReviews = fillWeeks(weekly, rg, loc)
-	if d.TopComplaints, err = s.repo.TopComplaints(ctx, shopID, rg, topComplaintsLimit); err != nil {
-		return domain.Dashboard{}, err
-	}
-	if d.RecentFeedbacks, err = s.repo.RecentFeedbacks(ctx, shopID, recentFeedbacksLimit); err != nil {
-		return domain.Dashboard{}, err
-	}
-	return d, nil
+
+	return domain.Dashboard{
+		Range:           rg,
+		KPI:             kpi,
+		SentimentTrend:  fillDays(trend, rg, loc),
+		WeeklyReviews:   fillWeeks(weekly, rg, loc),
+		TopComplaints:   top,
+		RecentFeedbacks: feedbacks,
+	}, nil
 }
 
 // ListIssues returns one page of the shop's issues with statistics and planet status.
@@ -129,20 +149,29 @@ func (s *InsightService) GetIssue(ctx context.Context, userID, issueID uuid.UUID
 	if err != nil {
 		return IssueDetail{}, err
 	}
-	summary, err := s.repo.GetIssueSummary(ctx, shopID, issueID)
-	if err != nil {
-		return IssueDetail{}, err
-	}
-	items := []domain.IssueSummary{summary}
-	if err := s.withPlanetStatus(ctx, shopID, items); err != nil {
-		return IssueDetail{}, err
-	}
-	evidence, err := s.repo.LatestEvidence(ctx, shopID, issueID, issueDetailEvidence)
-	if err != nil {
-		return IssueDetail{}, err
-	}
-	sessions, err := s.sessions.ListSessionsByIssue(ctx, shopID, issueID)
-	if err != nil {
+	var (
+		items    []domain.IssueSummary
+		evidence []domain.EvidenceOpinion
+		sessions []domain.ConsultationSession
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		summary, err := s.repo.GetIssueSummary(gctx, shopID, issueID)
+		if err != nil {
+			return err
+		}
+		items = []domain.IssueSummary{summary}
+		return s.withPlanetStatus(gctx, shopID, items)
+	})
+	g.Go(func() (err error) {
+		evidence, err = s.repo.LatestEvidence(gctx, shopID, issueID, issueDetailEvidence)
+		return err
+	})
+	g.Go(func() (err error) {
+		sessions, err = s.sessions.ListSessionsByIssue(gctx, shopID, issueID)
+		return err
+	})
+	if err := g.Wait(); err != nil {
 		return IssueDetail{}, err
 	}
 	return IssueDetail{ShopID: shopID, Summary: items[0], Evidence: evidence, Sessions: sessions}, nil

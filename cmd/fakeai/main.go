@@ -150,7 +150,17 @@ func (f fakeAI) ProcessConsultationTurn(ctx context.Context, req *aiv1.ProcessCo
 			break
 		}
 		refs.OpinionIds = append(refs.OpinionIds, e.GetOpinionId())
-		evidence = append(evidence, &aiv1.CustomerEvidence{OpinionId: e.GetOpinionId(), Quote: e.GetEvidenceText(), Note: "Representative complaint"})
+		quote := strings.TrimSpace(e.GetEvidenceText())
+		if quote == "" {
+			quote = strings.TrimSpace(e.GetOpinionText())
+		}
+		if quote == "" {
+			quote = strings.TrimSpace(e.GetFullFeedback())
+		}
+		if quote == "" {
+			quote = "Customer reported this issue"
+		}
+		evidence = append(evidence, &aiv1.CustomerEvidence{OpinionId: e.GetOpinionId(), Quote: quote, Note: "Representative complaint"})
 	}
 	for _, o := range owners {
 		refs.OwnerMessageIds = append(refs.OwnerMessageIds, o.GetId())

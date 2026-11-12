@@ -62,6 +62,11 @@ func TestUserService_Create(t *testing.T) {
 			in:      CreateUserInput{Name: "   ", Email: "ada@example.com"},
 			wantErr: apperror.ErrInvalidInput,
 		},
+		{
+			name:    "rejects invalid email",
+			in:      CreateUserInput{Name: "Ada", Email: "   "},
+			wantErr: apperror.ErrInvalidInput,
+		},
 	}
 
 	for _, tt := range tests {
@@ -91,6 +96,7 @@ func TestUserService_Update(t *testing.T) {
 	}{
 		{name: "rejects empty update", in: UpdateUserInput{}, wantErr: apperror.ErrInvalidInput},
 		{name: "rejects blank name", in: UpdateUserInput{Name: ptr(" ")}, wantErr: apperror.ErrInvalidInput},
+		{name: "rejects invalid email", in: UpdateUserInput{Email: ptr("not-an-email")}, wantErr: apperror.ErrInvalidInput},
 		{name: "normalizes email", in: UpdateUserInput{Email: ptr(" X@Y.COM")}, wantUpdated: true},
 	}
 

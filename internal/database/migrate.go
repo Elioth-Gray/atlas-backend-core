@@ -1,15 +1,16 @@
 package database
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	migratepgx "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
-	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"atlas-backend-core/migrations"
 )
@@ -22,10 +23,14 @@ func NewMigrator(databaseURL string) (*migrate.Migrate, error) {
 		return nil, fmt.Errorf("open embedded migrations: %w", err)
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	connCfg, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("parse database url: %w", err)
 	}
+	if connCfg.ConnectTimeout == 0 {
+		connCfg.ConnectTimeout = 5 * time.Second
+	}
+	db := stdlib.OpenDB(*connCfg)
 
 	driver, err := migratepgx.WithInstance(db, &migratepgx.Config{})
 	if err != nil {

@@ -78,6 +78,9 @@ func TestValidateTurnResult(t *testing.T) {
 		{name: "blank recommendation title", wantErr: "title", mutate: func(r *ConsultationTurnResult) {
 			r.Solution.Recommendations[0].Title = "  "
 		}},
+		{name: "claim without references", wantErr: "cite at least one source", mutate: func(r *ConsultationTurnResult) {
+			r.Solution.Findings[0].References = domain.References{}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,7 +109,7 @@ func TestValidateTurnResult_FiltersMemoryCandidates(t *testing.T) {
 	res := ConsultationTurnResult{
 		Question: &NextQuestion{TopicKey: "a", Text: "b"},
 		MemoryCandidates: []domain.MemoryCandidate{
-			{FactText: " Two baristas on weekends ", SourceOwnerMessageIDs: []uuid.UUID{ownerID}},
+			{FactText: " Two baristas on weekends ", SourceOwnerMessageIDs: []uuid.UUID{ownerID, ownerID}},
 			{FactText: "cites the AI", SourceOwnerMessageIDs: []uuid.UUID{aiMsgID}},
 			{FactText: "no sources"},
 			{FactText: " ", SourceOwnerMessageIDs: []uuid.UUID{ownerID}},
@@ -118,8 +121,8 @@ func TestValidateTurnResult_FiltersMemoryCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got.MemoryCandidates) != 1 || got.MemoryCandidates[0].FactText != "Two baristas on weekends" {
-		t.Errorf("candidates = %+v, want only the valid one", got.MemoryCandidates)
+	if len(got.MemoryCandidates) != 1 || got.MemoryCandidates[0].FactText != "Two baristas on weekends" || len(got.MemoryCandidates[0].SourceOwnerMessageIDs) != 1 {
+		t.Errorf("candidates = %+v, want only the valid deduplicated one", got.MemoryCandidates)
 	}
 	if len(got.ModelID) != maxModelIDLength {
 		t.Errorf("model id not truncated: %d", len(got.ModelID))

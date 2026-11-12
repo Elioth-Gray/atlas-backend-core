@@ -39,6 +39,7 @@ func TestBackoff(t *testing.T) {
 type fakeQueue struct {
 	job       *domain.FeedbackJob
 	completed bool
+	released  bool
 	retryAt   time.Time
 	failed    bool
 }
@@ -50,6 +51,11 @@ func (q *fakeQueue) ClaimJob(context.Context, time.Time, time.Duration) (*domain
 }
 
 func (q *fakeQueue) CompleteJob(context.Context, uuid.UUID) error { q.completed = true; return nil }
+
+func (q *fakeQueue) ReleaseJob(context.Context, uuid.UUID, time.Time) error {
+	q.released = true
+	return nil
+}
 
 func (q *fakeQueue) RetryJob(_ context.Context, _ uuid.UUID, at time.Time, _ string) error {
 	q.retryAt = at
@@ -66,16 +72,19 @@ func TestFeedbackWorker_RunOne(t *testing.T) {
 	cfg := config.WorkerConfig{MaxAttempts: 3, BaseBackoff: time.Second, MaxBackoff: time.Minute, Lease: time.Minute}
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name        string
-		attempts    int
-		procErr     error
-		wantDone    bool
-		wantRetried bool
-		wantFailed  bool
+		name         string
+		attempts     int
+		procErr      error
+		cancelWorker bool
+		wantDone     bool
+		wantReleased bool
+		wantRetried  bool
+		wantFailed   bool
 	}{
 		{name: "success completes the job", attempts: 1, wantDone: true},
 		{name: "failure is retried with backoff", attempts: 1, procErr: errors.New("ai down"), wantRetried: true},
 		{name: "last attempt fails permanently", attempts: 3, procErr: errors.New("ai down"), wantFailed: true},
+		{name: "worker shutdown releases job without penalty", attempts: 3, procErr: context.Canceled, cancelWorker: true, wantReleased: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -83,11 +92,18 @@ func TestFeedbackWorker_RunOne(t *testing.T) {
 			w := NewFeedbackWorker(q, procFunc(func(context.Context, uuid.UUID) error { return tt.procErr }), cfg, slog.New(slog.DiscardHandler))
 			w.now = func() time.Time { return now }
 
-			if !w.runOne(context.Background()) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if tt.cancelWorker {
+				cancel()
+			} else {
+				defer cancel()
+			}
+
+			if !w.runOne(ctx) {
 				t.Fatal("runOne found no job")
 			}
-			if q.completed != tt.wantDone || q.failed != tt.wantFailed || q.retryAt.IsZero() == tt.wantRetried {
-				t.Fatalf("done=%t failed=%t retryAt=%s", q.completed, q.failed, q.retryAt)
+			if q.completed != tt.wantDone || q.released != tt.wantReleased || q.failed != tt.wantFailed || q.retryAt.IsZero() == tt.wantRetried {
+				t.Fatalf("done=%t released=%t failed=%t retryAt=%s", q.completed, q.released, q.failed, q.retryAt)
 			}
 			if tt.wantRetried && !q.retryAt.After(now) {
 				t.Errorf("retry must be in the future, got %s", q.retryAt)

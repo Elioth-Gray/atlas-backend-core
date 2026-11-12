@@ -37,8 +37,7 @@ type AuthUserRepository interface {
 
 // ShopCreator creates the owner's first shop during registration.
 type ShopCreator interface {
-	CategoryExists(ctx context.Context, id uuid.UUID) (bool, error)
-	ScaleExists(ctx context.Context, id uuid.UUID) (bool, error)
+	masterDataChecker
 	Create(ctx context.Context, shop domain.Shop) (domain.Shop, error)
 	AddMember(ctx context.Context, m domain.ShopUser) error
 }
@@ -95,10 +94,14 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (AuthResul
 	if err != nil {
 		return AuthResult{}, err
 	}
+	email, err := validateEmail(in.Email)
+	if err != nil {
+		return AuthResult{}, err
+	}
 	if err := validatePassword(in.Password); err != nil {
 		return AuthResult{}, err
 	}
-	shopIn, err := normalizeShopInput(ctx, s.shops, in.Shop)
+	shopIn, cat, scale, err := normalizeShopInput(ctx, s.shops, in.Shop)
 	if err != nil {
 		return AuthResult{}, err
 	}
@@ -112,7 +115,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (AuthResul
 	err = s.tx.WithinTx(ctx, func(ctx context.Context) error {
 		user, err := s.users.Create(ctx, domain.User{
 			Name:         name,
-			Email:        normalizeEmail(in.Email),
+			Email:        email,
 			PhoneNumber:  optionalText(in.PhoneNumber),
 			PasswordHash: &hashStr,
 		})
@@ -130,6 +133,8 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (AuthResul
 		if err != nil {
 			return fmt.Errorf("create shop: %w", err)
 		}
+		shop.Category = &cat
+		shop.Scale = &scale
 		if err := s.shops.AddMember(ctx, domain.ShopUser{Role: domain.ShopRoleOwner, UserID: user.ID, ShopID: shop.ID}); err != nil {
 			return fmt.Errorf("add shop owner: %w", err)
 		}
@@ -214,32 +219,32 @@ func (s *AuthService) issue(ctx context.Context, userID uuid.UUID, expected *str
 	return tokens, nil
 }
 
-// masterDataChecker verifies category and scale IDs.
+// masterDataChecker verifies and loads category and scale master data.
 type masterDataChecker interface {
-	// CategoryExists also rejects disabled categories (only Bakery is enabled for now).
-	CategoryExists(ctx context.Context, id uuid.UUID) (bool, error)
-	ScaleExists(ctx context.Context, id uuid.UUID) (bool, error)
+	// GetCategory also rejects disabled categories (only Bakery is enabled for now).
+	GetCategory(ctx context.Context, id uuid.UUID) (domain.ShopCategory, error)
+	GetScale(ctx context.Context, id uuid.UUID) (domain.ShopScale, error)
 }
 
-// normalizeShopInput trims a shop profile and checks its master data references.
-func normalizeShopInput(ctx context.Context, master masterDataChecker, in ShopInput) (ShopInput, error) {
+// normalizeShopInput trims a shop profile and loads its master data references.
+func normalizeShopInput(ctx context.Context, master masterDataChecker, in ShopInput) (ShopInput, domain.ShopCategory, domain.ShopScale, error) {
 	name, err := requiredText("shop name", in.Name)
 	if err != nil {
-		return ShopInput{}, err
+		return ShopInput{}, domain.ShopCategory{}, domain.ShopScale{}, err
 	}
-	ok, err := master.CategoryExists(ctx, in.CategoryID)
+	cat, err := master.GetCategory(ctx, in.CategoryID)
+	if errors.Is(err, apperror.ErrNotFound) {
+		return ShopInput{}, domain.ShopCategory{}, domain.ShopScale{}, apperror.InvalidInput("unknown or unavailable shop category")
+	}
 	if err != nil {
-		return ShopInput{}, err
+		return ShopInput{}, domain.ShopCategory{}, domain.ShopScale{}, err
 	}
-	if !ok {
-		return ShopInput{}, apperror.InvalidInput("unknown or unavailable shop category")
+	scale, err := master.GetScale(ctx, in.ScaleID)
+	if errors.Is(err, apperror.ErrNotFound) {
+		return ShopInput{}, domain.ShopCategory{}, domain.ShopScale{}, apperror.InvalidInput("unknown shop scale")
 	}
-	ok, err = master.ScaleExists(ctx, in.ScaleID)
 	if err != nil {
-		return ShopInput{}, err
-	}
-	if !ok {
-		return ShopInput{}, apperror.InvalidInput("unknown shop scale")
+		return ShopInput{}, domain.ShopCategory{}, domain.ShopScale{}, err
 	}
 	return ShopInput{
 		Name:        name,
@@ -248,7 +253,7 @@ func normalizeShopInput(ctx context.Context, master masterDataChecker, in ShopIn
 		Image:       optionalText(in.Image),
 		CategoryID:  in.CategoryID,
 		ScaleID:     in.ScaleID,
-	}, nil
+	}, cat, scale, nil
 }
 
 func validatePassword(p string) error {
