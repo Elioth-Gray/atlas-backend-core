@@ -62,11 +62,22 @@ type TopComplaint struct {
 	SevereOpinions   int64
 }
 
-// DashboardRange is a half-open time range [From, To) in a time zone.
+// DashboardRange is a half-open time range [From, To) in a time zone, with optional
+// sentiment and priority filters.
 type DashboardRange struct {
-	From     time.Time
-	To       time.Time
-	TimeZone string
+	From      time.Time
+	To        time.Time
+	TimeZone  string
+	Sentiment string
+	Priority  string
+}
+
+// IssueFilter narrows the shop issue list by feedback date range, dominant sentiment, or planet status.
+type IssueFilter struct {
+	From      *time.Time
+	To        *time.Time
+	Sentiment string
+	Status    string
 }
 
 // Dashboard is the shop overview.

@@ -12,7 +12,7 @@ type shopProfileRequest struct {
 	Name        string  `json:"name" binding:"required,min=1,max=150"`
 	Description *string `json:"description" binding:"omitempty,max=2000"`
 	Website     *string `json:"website" binding:"omitempty,max=255"`
-	Image       *string `json:"image" binding:"omitempty,max=2048"`
+	Image       *string `json:"image" binding:"omitempty,max=524288"`
 	CategoryID  string  `json:"category_id" binding:"required,uuid"`
 	ScaleID     string  `json:"scale_id" binding:"required,uuid"`
 }
@@ -30,7 +30,7 @@ type updateShopRequest struct {
 	Name        string               `json:"name" binding:"required,min=1,max=150"`
 	Description *string              `json:"description" binding:"omitempty,max=2000"`
 	Website     *string              `json:"website" binding:"omitempty,max=255"`
-	Image       *string              `json:"image" binding:"omitempty,max=2048"`
+	Image       *string              `json:"image" binding:"omitempty,max=524288"`
 	CategoryID  string               `json:"category_id" binding:"required,uuid"`
 	ScaleID     string               `json:"scale_id" binding:"required,uuid"`
 	Owner       *ownerContactRequest `json:"owner"`

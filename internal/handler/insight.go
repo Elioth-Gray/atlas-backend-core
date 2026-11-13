@@ -18,7 +18,7 @@ const dateLayout = "2006-01-02"
 // InsightService is the business logic InsightHandler depends on.
 type InsightService interface {
 	Dashboard(ctx context.Context, userID, shopID uuid.UUID, in service.DashboardInput) (domain.Dashboard, error)
-	ListIssues(ctx context.Context, userID, shopID uuid.UUID, params service.PageParams) (service.Page[domain.IssueSummary], error)
+	ListIssues(ctx context.Context, userID, shopID uuid.UUID, in service.IssueListInput) (service.Page[domain.IssueSummary], error)
 	GetIssue(ctx context.Context, userID, issueID uuid.UUID) (service.IssueDetail, error)
 }
 
@@ -34,9 +34,21 @@ func NewInsightHandler(svc InsightService) *InsightHandler { return &InsightHand
 // inclusive calendar days in tz (default Asia/Jakarta); the default range is the last 30
 // days.
 type dashboardQuery struct {
-	From     string `form:"from" binding:"omitempty,datetime=2006-01-02"`
-	To       string `form:"to" binding:"omitempty,datetime=2006-01-02"`
-	TimeZone string `form:"tz" binding:"omitempty,max=64"`
+	From      string `form:"from" binding:"omitempty,datetime=2006-01-02"`
+	To        string `form:"to" binding:"omitempty,datetime=2006-01-02"`
+	TimeZone  string `form:"tz" binding:"omitempty,max=64"`
+	Sentiment string `form:"sentiment" binding:"omitempty,oneof=Positive Neutral Negative"`
+	Priority  string `form:"priority" binding:"omitempty,oneof=high medium low"`
+}
+
+// issuesQuery is the query string of GET /owner/shops/:shopId/issues.
+type issuesQuery struct {
+	pageQuery
+	From      string `form:"from" binding:"omitempty,datetime=2006-01-02"`
+	To        string `form:"to" binding:"omitempty,datetime=2006-01-02"`
+	TimeZone  string `form:"tz" binding:"omitempty,max=64"`
+	Sentiment string `form:"sentiment" binding:"omitempty,oneof=Positive Neutral Negative"`
+	Status    string `form:"status" binding:"omitempty,oneof=UNCONSULTED CONSULTED HAS_NEW_REVIEWS"`
 }
 
 // Dashboard handles GET /api/v1/owner/shops/:shopId/dashboard.
@@ -51,7 +63,11 @@ func (h *InsightHandler) Dashboard(c *gin.Context) {
 		return
 	}
 	d, err := h.svc.Dashboard(c.Request.Context(), userID, shopID, service.DashboardInput{
-		From: parseDate(q.From), To: parseDate(q.To), TimeZone: q.TimeZone,
+		From:      parseDate(q.From),
+		To:        parseDate(q.To),
+		TimeZone:  q.TimeZone,
+		Sentiment: q.Sentiment,
+		Priority:  q.Priority,
 	})
 	if err != nil {
 		handleError(c, err)
@@ -66,12 +82,19 @@ func (h *InsightHandler) ListIssues(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var q pageQuery
+	var q issuesQuery
 	if err := bindQuery(c, &q); err != nil {
 		handleError(c, err)
 		return
 	}
-	page, err := h.svc.ListIssues(c.Request.Context(), userID, shopID, q.params())
+	page, err := h.svc.ListIssues(c.Request.Context(), userID, shopID, service.IssueListInput{
+		PageParams: q.params(),
+		From:       parseDate(q.From),
+		To:         parseDate(q.To),
+		TimeZone:   q.TimeZone,
+		Sentiment:  q.Sentiment,
+		Status:     q.Status,
+	})
 	if err != nil {
 		handleError(c, err)
 		return

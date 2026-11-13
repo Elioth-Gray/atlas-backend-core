@@ -184,12 +184,12 @@ paths:
         '500': { $ref: '#/components/responses/InternalError' }
 
   # ---------------------------------------------------------------- Auth
-  /api/v1/auth/register:
+  /api/v1/auth/signup:
     post:
       tags: [Auth]
-      summary: Register an owner and their shop
-      description: Creates the user, the shop, and the Owner membership, then logs the user in.
-      operationId: register
+      summary: Sign up an owner and their shop
+      description: Creates the user, the shop, and the Owner membership, then signs the user in.
+      operationId: signup
       security: []
       requestBody:
         required: true
@@ -215,11 +215,11 @@ paths:
               example: { error: { code: CONFLICT, message: email is already registered } }
         '500': { $ref: '#/components/responses/InternalError' }
 
-  /api/v1/auth/login:
+  /api/v1/auth/signin:
     post:
       tags: [Auth]
-      summary: Log in with email and password
-      operationId: login
+      summary: Sign in with email and password
+      operationId: signin
       security: []
       requestBody:
         required: true
@@ -376,6 +376,14 @@ paths:
           in: query
           description: IANA time zone.
           schema: { type: string, maxLength: 64, default: Asia/Jakarta }
+        - name: sentiment
+          in: query
+          description: Optional sentiment filter.
+          schema: { type: string, enum: [Positive, Neutral, Negative] }
+        - name: priority
+          in: query
+          description: Optional priority filter.
+          schema: { type: string, enum: [high, medium, low] }
       responses:
         '200':
           description: The dashboard.
@@ -400,6 +408,21 @@ paths:
         - $ref: '#/components/parameters/ShopId'
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/PageSize'
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: tz
+          in: query
+          schema: { type: string, maxLength: 64, default: Asia/Jakarta }
+        - name: sentiment
+          in: query
+          schema: { type: string, enum: [Positive, Neutral, Negative] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [UNCONSULTED, CONSULTED, HAS_NEW_REVIEWS] }
       responses:
         '200':
           description: Issues with their statistics.
@@ -883,7 +906,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 150 }
         description: { type: string, nullable: true, maxLength: 2000 }
         website: { type: string, nullable: true, maxLength: 255 }
-        image: { type: string, nullable: true, maxLength: 2048, description: Image URL. }
+        image: { type: string, nullable: true, maxLength: 524288, description: Image URL or Data URL. }
         category_id: { type: string, format: uuid, description: From `GET /public/shop-categories`. }
         scale_id: { type: string, format: uuid, description: From `GET /public/shop-scales`. }
     UpdateShopRequest:
@@ -941,7 +964,7 @@ components:
         name: { type: string, nullable: true, maxLength: 100, description: Customer name; omit for anonymous. }
         rating: { type: number, format: double, minimum: 1, maximum: 5, description: 'One decimal place, e.g. 4.5.' }
         feedback: { type: string, minLength: 1, maxLength: 5000 }
-        image: { type: string, nullable: true, maxLength: 2048, description: Image URL. }
+        image: { type: string, nullable: true, maxLength: 524288, description: Image URL or Data URL. }
     FeedbackCreated:
       type: object
       required: [feedback_id, shop_id, rating, created_at]

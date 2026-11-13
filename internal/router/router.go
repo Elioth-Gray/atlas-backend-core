@@ -105,8 +105,8 @@ func registerPublicRoutes(g *gin.RouterGroup, shops *handler.ShopHandler) {
 }
 
 func registerAuthRoutes(g *gin.RouterGroup, h *handler.AuthHandler) {
-	g.POST("/register", h.Register)
-	g.POST("/login", h.Login)
+	g.POST("/signup", h.Register)
+	g.POST("/signin", h.Login)
 	g.POST("/refresh", h.Refresh)
 }
 

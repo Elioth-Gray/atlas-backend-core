@@ -44,7 +44,7 @@ type submitFeedbackRequest struct {
 	Name     *string  `json:"name" binding:"omitempty,max=100"`
 	Rating   *float64 `json:"rating" binding:"required,gte=1,lte=5"`
 	Feedback string   `json:"feedback" binding:"required,min=1,max=5000"`
-	Image    *string  `json:"image" binding:"omitempty,max=2048"`
+	Image    *string  `json:"image" binding:"omitempty,max=524288"`
 }
 
 // feedbackCreatedResponse acknowledges a stored feedback.

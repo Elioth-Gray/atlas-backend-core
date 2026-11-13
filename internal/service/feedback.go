@@ -250,6 +250,9 @@ func (p *FeedbackProcessor) store(ctx context.Context, fb domain.Feedback, opini
 func (p *FeedbackProcessor) resolveIssue(ctx context.Context, shopID uuid.UUID, op ExtractedOpinion,
 	known map[uuid.UUID]bool, newIssues map[string]uuid.UUID, touched map[uuid.UUID]bool,
 ) (*uuid.UUID, error) {
+	if op.Sentiment != domain.SentimentNegative {
+		return nil, nil
+	}
 	if op.ExistingIssueID != nil {
 		id := *op.ExistingIssueID
 		ok := known[id]

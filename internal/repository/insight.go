@@ -122,21 +122,33 @@ func (row issueAggregateRow) summary() domain.IssueSummary {
 
 func (r *InsightRepository) shopIssues(ctx context.Context, shopID uuid.UUID) *gorm.DB {
 	return shopOpinions(database.Conn(ctx, r.db), shopID).
-		Joins("JOIN issues i ON i.id = fo.issue_id AND i.is_deleted = false")
+		Joins("JOIN issues i ON i.id = fo.issue_id AND i.is_deleted = false").
+		Where("fo.sentiment = ?", domain.SentimentNegative)
+}
+
+func (r *InsightRepository) shopIssuesFiltered(ctx context.Context, shopID uuid.UUID, filter domain.IssueFilter) *gorm.DB {
+	q := r.shopIssues(ctx, shopID)
+	if filter.From != nil {
+		q = q.Where("f.created_at >= ?", *filter.From)
+	}
+	if filter.To != nil {
+		q = q.Where("f.created_at < ?", *filter.To)
+	}
+	return q
 }
 
 // ListIssueSummaries returns one page of the shop's issues with their statistics, the
 // largest first, and the total number of issues.
-func (r *InsightRepository) ListIssueSummaries(ctx context.Context, shopID uuid.UUID, limit, offset int) ([]domain.IssueSummary, int64, error) {
+func (r *InsightRepository) ListIssueSummaries(ctx context.Context, shopID uuid.UUID, filter domain.IssueFilter, limit, offset int) ([]domain.IssueSummary, int64, error) {
 	var total int64
-	if err := r.shopIssues(ctx, shopID).Distinct("fo.issue_id").Count(&total).Error; err != nil {
+	if err := r.shopIssuesFiltered(ctx, shopID, filter).Distinct("fo.issue_id").Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count issues: %w", err)
 	}
 	if total == 0 {
 		return []domain.IssueSummary{}, 0, nil
 	}
 	var rows []issueAggregateRow
-	err := r.shopIssues(ctx, shopID).
+	err := r.shopIssuesFiltered(ctx, shopID, filter).
 		Select(issueAggregateSelect).
 		Group("i.id, i.title, i.created_at, i.updated_at").
 		Order("opinion_count DESC").
@@ -184,7 +196,7 @@ func (r *InsightRepository) withRatings(ctx context.Context, shopID uuid.UUID, r
 		ids[i] = row.IssueID
 	}
 	distinct := shopOpinions(database.Conn(ctx, r.db), shopID).
-		Where("fo.issue_id IN ?", ids).
+		Where("fo.issue_id IN ? AND fo.sentiment = ?", ids, domain.SentimentNegative).
 		Select("DISTINCT fo.issue_id, f.id, f.rating")
 	var ratings []struct {
 		IssueID       uuid.UUID
@@ -238,11 +250,11 @@ const evidenceSelect = `fo.id AS opinion_id, fo.opinion_text AS opinion_text, fo
 	fo.sentiment AS sentiment, fo.severity AS severity, f.id AS feedback_id, f.feedback AS full_feedback,
 	f.rating AS rating, f.created_at AS created_at`
 
-// LatestEvidence returns the newest opinions of the issue within the shop.
+// LatestEvidence returns the newest negative opinions of the issue within the shop.
 func (r *InsightRepository) LatestEvidence(ctx context.Context, shopID, issueID uuid.UUID, limit int) ([]domain.EvidenceOpinion, error) {
 	var out []domain.EvidenceOpinion
 	err := shopOpinions(database.Conn(ctx, r.db), shopID).
-		Where("fo.issue_id = ?", issueID).
+		Where("fo.issue_id = ? AND fo.sentiment = ?", issueID, domain.SentimentNegative).
 		Select(evidenceSelect).
 		Order("f.created_at DESC").
 		Order("fo.id").
@@ -254,12 +266,12 @@ func (r *InsightRepository) LatestEvidence(ctx context.Context, shopID, issueID 
 	return out, nil
 }
 
-// RepresentativeEvidence returns a sample of the issue's opinions for the AI: severe
-// first, then negative, then the most recent.
+// RepresentativeEvidence returns a sample of the issue's negative opinions for the AI: severe
+// first, then the most recent.
 func (r *InsightRepository) RepresentativeEvidence(ctx context.Context, shopID, issueID uuid.UUID, limit int) ([]domain.EvidenceOpinion, error) {
 	var out []domain.EvidenceOpinion
 	err := shopOpinions(database.Conn(ctx, r.db), shopID).
-		Where("fo.issue_id = ?", issueID).
+		Where("fo.issue_id = ? AND fo.sentiment = ?", issueID, domain.SentimentNegative).
 		Select(evidenceSelect).
 		Order("(fo.severity IS NOT NULL) DESC").
 		Order("(fo.sentiment = 'Negative') DESC").
@@ -273,15 +285,51 @@ func (r *InsightRepository) RepresentativeEvidence(ctx context.Context, shopID, 
 	return out, nil
 }
 
+func applyFeedbackRangeFilter(q *gorm.DB, shopID uuid.UUID, rg domain.DashboardRange) *gorm.DB {
+	q = q.Where("shop_id = ? AND is_deleted = false AND created_at >= ? AND created_at < ?", shopID, rg.From, rg.To)
+	switch rg.Sentiment {
+	case string(domain.SentimentPositive):
+		q = q.Where(`(rating >= 4 OR EXISTS (SELECT 1 FROM feedback_opinions fo WHERE fo.feedback_id = feedbacks.id AND fo.is_deleted = false AND fo.sentiment = 'Positive'))`)
+	case string(domain.SentimentNeutral):
+		q = q.Where(`((rating >= 3 AND rating < 4) OR EXISTS (SELECT 1 FROM feedback_opinions fo WHERE fo.feedback_id = feedbacks.id AND fo.is_deleted = false AND fo.sentiment = 'Neutral'))`)
+	case string(domain.SentimentNegative):
+		q = q.Where(`(rating < 3 OR EXISTS (SELECT 1 FROM feedback_opinions fo WHERE fo.feedback_id = feedbacks.id AND fo.is_deleted = false AND fo.sentiment = 'Negative'))`)
+	}
+	switch rg.Priority {
+	case "high":
+		q = q.Where(`(rating <= 2 OR EXISTS (SELECT 1 FROM feedback_opinions fo WHERE fo.feedback_id = feedbacks.id AND fo.is_deleted = false AND fo.severity = 'Severe'))`)
+	case "medium":
+		q = q.Where(`((rating > 2 AND rating <= 3) OR EXISTS (SELECT 1 FROM feedback_opinions fo WHERE fo.feedback_id = feedbacks.id AND fo.is_deleted = false AND (fo.severity IS NULL OR fo.severity = 'NotSevere') AND fo.sentiment IN ('Negative', 'Neutral')))`)
+	case "low":
+		q = q.Where(`(rating >= 4 OR EXISTS (SELECT 1 FROM feedback_opinions fo WHERE fo.feedback_id = feedbacks.id AND fo.is_deleted = false AND fo.sentiment = 'Positive'))`)
+	}
+	return q
+}
+
+func applyOpinionRangeFilter(q *gorm.DB, rg domain.DashboardRange) *gorm.DB {
+	q = q.Where("f.created_at >= ? AND f.created_at < ?", rg.From, rg.To)
+	if rg.Sentiment != "" {
+		q = q.Where("fo.sentiment = ?", rg.Sentiment)
+	}
+	switch rg.Priority {
+	case "high":
+		q = q.Where("(fo.severity = 'Severe' OR f.rating <= 2)")
+	case "medium":
+		q = q.Where("((fo.severity IS NULL OR fo.severity = 'NotSevere') AND fo.sentiment IN ('Negative', 'Neutral') AND f.rating > 2)")
+	case "low":
+		q = q.Where("(fo.sentiment = 'Positive' OR f.rating >= 4)")
+	}
+	return q
+}
+
 // DashboardKPI returns the headline numbers of the shop within the range.
 func (r *InsightRepository) DashboardKPI(ctx context.Context, shopID uuid.UUID, rg domain.DashboardRange) (domain.DashboardKPI, error) {
 	var fb struct {
 		TotalFeedbacks int64
 		AverageRating  float64
 	}
-	err := database.Conn(ctx, r.db).Model(&domain.Feedback{}).
+	err := applyFeedbackRangeFilter(database.Conn(ctx, r.db).Model(&domain.Feedback{}), shopID, rg).
 		Select("COUNT(*) AS total_feedbacks, COALESCE(AVG(rating), 0)::float8 AS average_rating").
-		Where("shop_id = ? AND is_deleted = false AND created_at >= ? AND created_at < ?", shopID, rg.From, rg.To).
 		Scan(&fb).Error
 	if err != nil {
 		return domain.DashboardKPI{}, fmt.Errorf("dashboard feedback kpi: %w", err)
@@ -294,14 +342,13 @@ func (r *InsightRepository) DashboardKPI(ctx context.Context, shopID uuid.UUID, 
 		Severe        int64
 		ActiveIssues  int64
 	}
-	err = shopOpinions(database.Conn(ctx, r.db), shopID).
-		Where("f.created_at >= ? AND f.created_at < ?", rg.From, rg.To).
+	err = applyOpinionRangeFilter(shopOpinions(database.Conn(ctx, r.db), shopID), rg).
 		Select(`COUNT(fo.id) AS total_opinions,
 			COUNT(*) FILTER (WHERE fo.sentiment = 'Negative') AS negative,
 			COUNT(*) FILTER (WHERE fo.sentiment = 'Positive') AS positive,
 			COUNT(*) FILTER (WHERE fo.sentiment = 'Neutral') AS neutral,
-			COUNT(*) FILTER (WHERE fo.severity = 'Severe') AS severe,
-			COUNT(DISTINCT fo.issue_id) AS active_issues`).
+			COUNT(*) FILTER (WHERE fo.sentiment = 'Negative' AND fo.severity = 'Severe') AS severe,
+			COUNT(DISTINCT fo.issue_id) FILTER (WHERE fo.sentiment = 'Negative') AS active_issues`).
 		Scan(&op).Error
 	if err != nil {
 		return domain.DashboardKPI{}, fmt.Errorf("dashboard opinion kpi: %w", err)
@@ -324,8 +371,7 @@ func (r *InsightRepository) SentimentTrend(ctx context.Context, shopID uuid.UUID
 		Positive int64
 		Neutral  int64
 	}
-	err := shopOpinions(database.Conn(ctx, r.db), shopID).
-		Where("f.created_at >= ? AND f.created_at < ?", rg.From, rg.To).
+	err := applyOpinionRangeFilter(shopOpinions(database.Conn(ctx, r.db), shopID), rg).
 		Select(`date_trunc('day', f.created_at AT TIME ZONE ?) AS bucket,
 			COUNT(*) FILTER (WHERE fo.sentiment = 'Negative') AS negative,
 			COUNT(*) FILTER (WHERE fo.sentiment = 'Positive') AS positive,
@@ -353,8 +399,7 @@ func (r *InsightRepository) WeeklyReviews(ctx context.Context, shopID uuid.UUID,
 		FeedbackCount int64
 		AverageRating float64
 	}
-	err := database.Conn(ctx, r.db).Model(&domain.Feedback{}).
-		Where("shop_id = ? AND is_deleted = false AND created_at >= ? AND created_at < ?", shopID, rg.From, rg.To).
+	err := applyFeedbackRangeFilter(database.Conn(ctx, r.db).Model(&domain.Feedback{}), shopID, rg).
 		Select(`date_trunc('week', created_at AT TIME ZONE ?) AS bucket,
 			COUNT(*) AS feedback_count, COALESCE(AVG(rating), 0)::float8 AS average_rating`, rg.TimeZone).
 		Group("bucket").
@@ -373,8 +418,8 @@ func (r *InsightRepository) WeeklyReviews(ctx context.Context, shopID uuid.UUID,
 // TopComplaints returns the issues with the most negative opinions within the range.
 func (r *InsightRepository) TopComplaints(ctx context.Context, shopID uuid.UUID, rg domain.DashboardRange, limit int) ([]domain.TopComplaint, error) {
 	var out []domain.TopComplaint
-	err := r.shopIssues(ctx, shopID).
-		Where("f.created_at >= ? AND f.created_at < ? AND fo.sentiment = ?", rg.From, rg.To, domain.SentimentNegative).
+	err := applyOpinionRangeFilter(r.shopIssues(ctx, shopID), rg).
+		Where("fo.sentiment = ?", domain.SentimentNegative).
 		Select(`i.id AS issue_id, i.title AS title, COUNT(fo.id) AS negative_opinions,
 			COUNT(DISTINCT f.id) AS unique_feedbacks,
 			COUNT(*) FILTER (WHERE fo.severity = 'Severe') AS severe_opinions`).
@@ -390,11 +435,10 @@ func (r *InsightRepository) TopComplaints(ctx context.Context, shopID uuid.UUID,
 	return out, nil
 }
 
-// RecentFeedbacks returns the shop's newest feedbacks.
-func (r *InsightRepository) RecentFeedbacks(ctx context.Context, shopID uuid.UUID, limit int) ([]domain.Feedback, error) {
+// RecentFeedbacks returns the shop's newest feedbacks matching the range and filters.
+func (r *InsightRepository) RecentFeedbacks(ctx context.Context, shopID uuid.UUID, rg domain.DashboardRange, limit int) ([]domain.Feedback, error) {
 	var out []domain.Feedback
-	err := database.Conn(ctx, r.db).
-		Where("shop_id = ? AND is_deleted = false", shopID).
+	err := applyFeedbackRangeFilter(database.Conn(ctx, r.db), shopID, rg).
 		Order("created_at DESC, id DESC").
 		Limit(limit).
 		Find(&out).Error
