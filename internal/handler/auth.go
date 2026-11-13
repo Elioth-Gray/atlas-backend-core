@@ -27,7 +27,7 @@ type AuthHandler struct {
 // NewAuthHandler returns an AuthHandler.
 func NewAuthHandler(svc AuthService) *AuthHandler { return &AuthHandler{svc: svc} }
 
-// registerRequest is the body of POST /auth/register.
+// registerRequest is the body of POST /auth/signup.
 type registerRequest struct {
 	Name        string              `json:"name" binding:"required,min=1,max=100"`
 	Email       string              `json:"email" binding:"required,email,max=254"`
@@ -36,7 +36,7 @@ type registerRequest struct {
 	Shop        *shopProfileRequest `json:"shop" binding:"required"`
 }
 
-// loginRequest is the body of POST /auth/login.
+// loginRequest is the body of POST /auth/signin.
 type loginRequest struct {
 	Email    string `json:"email" binding:"required,email,max=254"`
 	Password string `json:"password" binding:"required,max=72"`
@@ -74,7 +74,7 @@ func newAuthResponse(r service.AuthResult) authResponse {
 	return out
 }
 
-// Register handles POST /api/v1/auth/register: creates an owner account and their shop.
+// Register handles POST /api/v1/auth/signup: creates an owner account and their shop.
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req registerRequest
 	if err := bindJSON(c, &req); err != nil {
@@ -95,7 +95,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	c.JSON(http.StatusCreated, httpx.DataResponse[authResponse]{Data: newAuthResponse(res)})
 }
 
-// Login handles POST /api/v1/auth/login.
+// Login handles POST /api/v1/auth/signin.
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req loginRequest
 	if err := bindJSON(c, &req); err != nil {

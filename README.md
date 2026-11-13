@@ -101,8 +101,8 @@ All routes live under `/api/v1`. `/owner/*` routes need `Authorization: Bearer <
 | Public | `GET /public/shops/:shopId` | Shop profile for the customer QR page |
 | | `POST /public/shops/:shopId/feedbacks` | `{name?, rating 1.0-5.0, feedback, image?}` → `201 {feedback_id}`; the AI runs in the background |
 | | `GET /public/shop-categories`, `GET /public/shop-scales` | Master data for the registration form |
-| Auth | `POST /auth/register` | Owner account **and** their shop: `{name, email, password, phone_number?, shop: {name, category_id, scale_id, description?, website?, image?}}` |
-| | `POST /auth/login` | `{email, password}` → access + refresh token |
+| Auth | `POST /auth/signup` | Owner account **and** their shop: `{name, email, password, phone_number?, shop: {name, category_id, scale_id, description?, website?, image?}}` |
+| | `POST /auth/signin` | `{email, password}` → access + refresh token |
 | | `POST /auth/refresh` | `{refresh_token}` → new pair; refresh tokens are single use |
 | Shops | `GET /owner/shops`, `GET /owner/shops/:shopId` | My shops with my role |
 | | `PUT /owner/shops/:shopId` | Owner only: full shop profile + optional `owner: {name?, phone_number?}` |
@@ -123,7 +123,7 @@ Consultation rules the frontend relies on:
 - AI outages and AI answers that fail validation (unknown evidence IDs, missing solution parts) answer `503`; the session state is unchanged and the turn can be retried.
 
 ```bash
-curl -X POST localhost:3333/api/v1/auth/login -H "Content-Type: application/json" \
+curl -X POST localhost:3333/api/v1/auth/signin -H "Content-Type: application/json" \
      -d '{"email":"owner@example.com","password":"rahasia123"}'
 curl localhost:3333/api/v1/owner/shops -H "Authorization: Bearer <access_token>"
 ```

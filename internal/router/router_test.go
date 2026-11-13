@@ -65,11 +65,11 @@ func TestInitRouter(t *testing.T) {
 		{name: "liveness", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK},
 		{name: "readiness", method: http.MethodGet, path: "/readyz", wantStatus: http.StatusOK},
 		{name: "unknown route", method: http.MethodGet, path: "/nope", wantStatus: http.StatusNotFound, wantCode: httpx.CodeRouteNotFound},
-		{name: "wrong method", method: http.MethodPut, path: "/api/v1/auth/login", wantStatus: http.StatusMethodNotAllowed, wantCode: httpx.CodeMethodNotAllowed},
+		{name: "wrong method", method: http.MethodPut, path: "/api/v1/auth/signin", wantStatus: http.StatusMethodNotAllowed, wantCode: httpx.CodeMethodNotAllowed},
 		{name: "invalid id reaches validation", method: http.MethodGet, path: "/api/v1/public/shops/x", wantStatus: http.StatusBadRequest, wantCode: httpx.CodeValidation},
 		{name: "owner routes require a token", method: http.MethodGet, path: "/api/v1/owner/shops", wantStatus: http.StatusUnauthorized, wantCode: httpx.CodeUnauthorized},
 		{name: "owner routes reject a bad token", method: http.MethodGet, path: "/api/v1/owner/shops", bearer: "nope", wantStatus: http.StatusUnauthorized, wantCode: httpx.CodeUnauthorized},
-		{name: "cors preflight from allowed origin", method: http.MethodOptions, path: "/api/v1/auth/login", origin: "http://localhost:3000", wantStatus: http.StatusNoContent},
+		{name: "cors preflight from allowed origin", method: http.MethodOptions, path: "/api/v1/auth/signin", origin: "http://localhost:3000", wantStatus: http.StatusNoContent},
 	}
 
 	for _, tt := range tests {
